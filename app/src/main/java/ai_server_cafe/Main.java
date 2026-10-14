@@ -58,7 +58,7 @@ public class Main {
 		RecordThread.getInstance().start();
 		ReplayThread.getInstance().start();
 		RobotDriver.getInstance().start();
-		ObserverThread.getInstance().start();
+		//ObserverThread.getInstance().start();
 		GuiThread.getInstance().setVisible(true);
 		GameThread.getInstance(TeamColor.BLUE).start();
 		GameThread.getInstance(TeamColor.YELLOW).start();
