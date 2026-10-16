@@ -6,6 +6,7 @@ app/build/
 app/config/
 app/bin/
 app/data/
+app/rl_data/
 app/native/
 app/task/
 

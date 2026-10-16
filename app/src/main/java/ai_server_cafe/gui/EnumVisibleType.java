@@ -17,7 +17,8 @@ public enum EnumVisibleType {
     DEMO(9, "Demo"),
     DRIBBLESTATE(10, "Dribble State"),
     OBSTACLES(11, "Obstacles"),
-    CLIP(12, "Clip");
+    CLIP(12, "Clip"),
+    RL_DRIBBLE(13, "RL Dribble");
 
     private final int id;
     private final String name;
