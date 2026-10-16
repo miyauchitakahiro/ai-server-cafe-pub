@@ -10,6 +10,7 @@ import ai_server_cafe.gui.item.DrawIntegratedRobots;
 import ai_server_cafe.gui.item.DrawObstacles;
 import ai_server_cafe.gui.item.DrawPaths;
 import ai_server_cafe.gui.item.DrawReferee;
+import ai_server_cafe.gui.item.DrawRLDribble;
 import ai_server_cafe.gui.item.DrawScores;
 import ai_server_cafe.gui.item.IItemDraw;
 
@@ -26,7 +27,9 @@ public final class RegistryGraphicalComponents {
     public static final IItemDraw PATHS = new DrawPaths();
     public static final IItemDraw REFEREE = new DrawReferee();
     public static final IItemDraw SCORES = new DrawScores();
-    public static final List<IItemDraw> REGISTRY = List.of(FIELD, REFEREE, SCORES, ROBOTS, PATHS, BALL, OBSTACLES);
+    public static final IItemDraw RL_DRIBBLE = new DrawRLDribble();
+    // RL_DRIBBLEはロボットとボールの下に描く
+    public static final List<IItemDraw> REGISTRY = List.of(FIELD, REFEREE, SCORES, RL_DRIBBLE, ROBOTS, PATHS, BALL, OBSTACLES);
 
     @Nonnull
     public static List<Class<? extends IContainerCafe>> getContainers() {

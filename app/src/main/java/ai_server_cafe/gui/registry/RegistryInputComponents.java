@@ -2,6 +2,7 @@ package ai_server_cafe.gui.registry;
 
 import ai_server_cafe.Main;
 import ai_server_cafe.config.Config;
+import ai_server_cafe.config.EnumRLActionSource;
 import ai_server_cafe.device.keyboard.InputKeyListenerCafe;
 import ai_server_cafe.game.strategy.XGType;
 import ai_server_cafe.gui.ConfigArea;
@@ -36,6 +37,7 @@ import ai_server_cafe.network.radio.EnumRadioType;
 import ai_server_cafe.replay.ReplayState;
 import ai_server_cafe.replay.clip.ClipState;
 import ai_server_cafe.replay.clip.FileExtension;
+import ai_server_cafe.rl.RLDribbleSession;
 import ai_server_cafe.updater.ConfigBuffers;
 import ai_server_cafe.updater.ConfigManager;
 import ai_server_cafe.updater.UpdaterJoyStick;
@@ -74,6 +76,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.DoubleConsumer;
+import java.util.function.DoubleSupplier;
 
 public class RegistryInputComponents {
     public static final Logger LOGGER = LogManager.getLogger("inputs");
@@ -117,6 +121,7 @@ public class RegistryInputComponents {
         setComponentDribbleState(tabArea);
         setComponentObstacleView(tabArea);
         setComponentClipTab(tabArea);
+        setComponentRLDribble(tabArea);
         window.addContents(tabArea, TabArea.class);
 
         List<Component> replayArea = new ArrayList<>();
@@ -1870,6 +1875,164 @@ public class RegistryInputComponents {
                 new TextAreaCafe(String.valueOf(ConfigManager.getInstance().getConfig().dribbleState.backAcc), 0.2, lc4.getY(), 160, 1,
                         setBackAcc, EnumVisibleType.DRIBBLESTATE).setDisplayType(0, EnumDisplayType.RATIO)
                         .setOffset(100));
+    }
+
+    /**
+     * ドリブル強化学習 (パス・シュート) のデータ収集タブ
+     * 報酬の重みなどここに無い設定は Config Editor の rlDribble から変更する
+     */
+    private static void setComponentRLDribble(@Nonnull List<Component> components) {
+        final EnumVisibleType tab = EnumVisibleType.RL_DRIBBLE;
+        final Config.RLDribble cfg = ConfigManager.getInstance().getConfig().rlDribble;
+
+        components.add(new ButtonCafe("Start", 0.05, 5, 0.2, 22, new IFuncParam1<Void, Boolean>() {
+            @Override
+            @Nullable
+            public Void function(Boolean aBoolean) {
+                RLDribbleSession.getInstance().start();
+                return null;
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+        components.add(new ButtonCafe("Stop", 0.27, 5, 0.2, 22, new IFuncParam1<Void, Boolean>() {
+            @Override
+            @Nullable
+            public Void function(Boolean aBoolean) {
+                RLDribbleSession.getInstance().stop();
+                return null;
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+        components.add(new SwitchBoxCafe("save data", 0.4, cfg.saveData, 20, 0.52, 6,
+                ColorHelper.SWITCH_GRAY, ColorHelper.ARCHIVE_SKY, ColorHelper.LINE_WHITE, new IFuncParam1<Void, Boolean>() {
+            @Override
+            @Nullable
+            public Void function(Boolean arg) {
+                Config.RLDribble editable = ConfigManager.getInstance().getEditableConfig().rlDribble;
+                if (editable.saveData != arg) {
+                    editable.saveData = arg;
+                    ConfigManager.getInstance().markDirty();
+                }
+                return null;
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+
+        components.add(new DynamicLabelCafe("idle", 0.05, 35, new IFuncParam1<String, String>() {
+            @Override
+            @Nonnull
+            public String function(String s) {
+                return "status : " + RLDribbleSession.getInstance().getStatusText();
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO));
+        components.add(new DynamicLabelCafe("-", 0.05, 55, new IFuncParam1<String, String>() {
+            @Override
+            @Nonnull
+            public String function(String s) {
+                return "output : " + RLDribbleSession.getInstance().getOutputText();
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO));
+
+        components.add(new LabelCafe("action source :", 0.05, 80, tab).setDisplayType(0, EnumDisplayType.RATIO));
+        components.add(new ComboBoxCafe<>(EnumRLActionSource.values(), cfg.actionSource, 0.35, 76, 0.35, 22,
+                new IFuncParam1<Void, EnumRLActionSource>() {
+                    @Override
+                    @Nullable
+                    public Void function(@Nonnull EnumRLActionSource arg) {
+                        Config.RLDribble editable = ConfigManager.getInstance().getEditableConfig().rlDribble;
+                        if (editable.actionSource != arg) {
+                            editable.actionSource = arg;
+                            ConfigManager.getInstance().markDirty();
+                        }
+                        return null;
+                    }
+                }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+        components.add(new SwitchBoxCafe("draw", 0.25, cfg.drawScenario, 20, 0.73, 77,
+                ColorHelper.SWITCH_GRAY, ColorHelper.ARCHIVE_SKY, ColorHelper.LINE_WHITE, new IFuncParam1<Void, Boolean>() {
+            @Override
+            @Nullable
+            public Void function(Boolean arg) {
+                Config.RLDribble editable = ConfigManager.getInstance().getEditableConfig().rlDribble;
+                if (editable.drawScenario != arg) {
+                    editable.drawScenario = arg;
+                    ConfigManager.getInstance().markDirty();
+                }
+                return null;
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+
+        // 数値設定 (2列)
+        final double left = 0.05;
+        final double right = 0.52;
+        final int top = 104;
+        final int pitch = 19;
+        addRLDribbleField(components, "episodes", left, top, true,
+                () -> rlConfig().targetEpisodes, v -> rlConfig().targetEpisodes = (int) v);
+        addRLDribbleField(components, "robot id", left, top + pitch, true,
+                () -> rlConfig().robotId, v -> rlConfig().robotId = (int) v);
+        addRLDribbleField(components, "max time [s]", left, top + pitch * 2, false,
+                () -> rlConfig().maxEpisodeTime, v -> rlConfig().maxEpisodeTime = v);
+        addRLDribbleField(components, "settle [s]", left, top + pitch * 3, false,
+                () -> rlConfig().settleTime, v -> rlConfig().settleTime = v);
+        addRLDribbleField(components, "ball start", left, top + pitch * 4, false,
+                () -> rlConfig().ballStartDistance, v -> rlConfig().ballStartDistance = v);
+        addRLDribbleField(components, "shoot ratio", left, top + pitch * 5, false,
+                () -> rlConfig().shootRatio, v -> rlConfig().shootRatio = v);
+        addRLDribbleField(components, "pass min", left, top + pitch * 6, false,
+                () -> rlConfig().passMinDist, v -> rlConfig().passMinDist = v);
+        addRLDribbleField(components, "pass max", left, top + pitch * 7, false,
+                () -> rlConfig().passMaxDist, v -> rlConfig().passMaxDist = v);
+        addRLDribbleField(components, "shoot max", left, top + pitch * 8, false,
+                () -> rlConfig().shootMaxDist, v -> rlConfig().shootMaxDist = v);
+        addRLDribbleField(components, "pass radius", right, top, false,
+                () -> rlConfig().passSuccessRadius, v -> rlConfig().passSuccessRadius = v);
+        addRLDribbleField(components, "shoot speed", right, top + pitch, false,
+                () -> rlConfig().shootSpeed, v -> rlConfig().shootSpeed = v);
+        addRLDribbleField(components, "kick hold [frm]", right, top + pitch * 2, true,
+                () -> rlConfig().kickHoldTime, v -> rlConfig().kickHoldTime = (int) v);
+        addRLDribbleField(components, "dribble limit", right, top + pitch * 3, false,
+                () -> rlConfig().dribbleLimit, v -> rlConfig().dribbleLimit = v);
+        addRLDribbleField(components, "lost distance", right, top + pitch * 4, false,
+                () -> rlConfig().lostDistance, v -> rlConfig().lostDistance = v);
+        addRLDribbleField(components, "noise vel std", right, top + pitch * 5, false,
+                () -> rlConfig().noiseVelStd, v -> rlConfig().noiseVelStd = v);
+        addRLDribbleField(components, "noise omega std", right, top + pitch * 6, false,
+                () -> rlConfig().noiseOmegaStd, v -> rlConfig().noiseOmegaStd = v);
+        addRLDribbleField(components, "seed (0:time)", right, top + pitch * 7, true,
+                () -> rlConfig().seed, v -> rlConfig().seed = (long) v);
+        addRLDribbleField(components, "reset pause [s]", right, top + pitch * 8, false,
+                () -> rlConfig().resetPause, v -> rlConfig().resetPause = v);
+    }
+
+    @Nonnull
+    private static Config.RLDribble rlConfig() {
+        return ConfigManager.getInstance().getEditableConfig().rlDribble;
+    }
+
+    /**
+     * ラベルと数値入力欄を1組追加する
+     * 不正な入力は無視し、値が変わったときだけconfigをdirtyにする
+     */
+    private static void addRLDribbleField(@Nonnull List<Component> components, @Nonnull String label, double x, int y,
+                                          boolean isInteger, @Nonnull DoubleSupplier getter, @Nonnull DoubleConsumer setter) {
+        components.add(new LabelCafe(label + " :", x, y, EnumVisibleType.RL_DRIBBLE).setDisplayType(0, EnumDisplayType.RATIO));
+        final double init = getter.getAsDouble();
+        final String initText = isInteger ? String.valueOf((long) init) : String.valueOf(init);
+        components.add(new TextAreaCafe(initText, x, y, 70, 1, new IFuncParam1<Void, String>() {
+            @Override
+            @Nullable
+            public Void function(String s) {
+                if (s == null)
+                    return null;
+                try {
+                    final double value = isInteger ? Long.parseLong(s.trim()) : Double.parseDouble(s.trim());
+                    if (value != getter.getAsDouble()) {
+                        setter.accept(value);
+                        ConfigManager.getInstance().markDirty();
+                    }
+                } catch (NumberFormatException e) {
+                    LOGGER.warn("invalid value for {} : {}", label, s);
+                }
+                return null;
+            }
+        }, EnumVisibleType.RL_DRIBBLE).setDisplayType(0, EnumDisplayType.RATIO).setOffset(115));
     }
 
     private static void setComponentLog(@Nonnull List<Component> components) {
