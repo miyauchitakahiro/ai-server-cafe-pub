@@ -754,6 +754,8 @@ public class Config extends AbstractCloneable {
      */
     public static class RLDribble extends AbstractCloneable {
         // 収集
+        public EnumRLEnvironment environment; // シミュレータか実機か
+        public EnumRLResetMode resetMode;   // 初期配置の作り方 (実機ではFROM_BALLのみ)
         public int targetEpisodes;          // 自動で収集するエピソード数
         public boolean saveData;            // falseなら動作のみでファイルに保存しない
         public String outputDir;            // 保存先 (この下に実行ごとのディレクトリを作る)
@@ -767,7 +769,8 @@ public class Config extends AbstractCloneable {
         public double settleTime;           // テレポート後に静止させて待つ時間
         public double resetPause;           // エピソード終了から次のテレポートまで停止させる時間
         public int maxResetRetries;         // 連続でリセットに失敗したら収集を止める
-        public boolean parkOtherRobots;     // 使わないロボットをタッチラインの外に並べる
+        public double approachTimeout;      // FROM_BALL: この時間内に開始位置に着かなければ初期配置を作り直す
+        public boolean parkOtherRobots;     // 使わないロボットをタッチラインの外に並べる (TELEPORTのみ)
         // 初期配置
         public double spawnMargin;          // フィールド境界からの余白
         public double ballStartDistance;    // 開始時のロボット中心からボールまでの距離 (ボールはロボットの正面)
@@ -802,6 +805,8 @@ public class Config extends AbstractCloneable {
         public double actionRatePenalty;    // 正規化した行動変化量の二乗に掛ける
 
         public RLDribble() {
+            this.environment = EnumRLEnvironment.SIMULATOR;
+            this.resetMode = EnumRLResetMode.TELEPORT;
             this.targetEpisodes = 100;
             this.saveData = true;
             this.outputDir = "rl_data";
@@ -814,6 +819,7 @@ public class Config extends AbstractCloneable {
             this.settleTime = 0.6;
             this.resetPause = 1.0;
             this.maxResetRetries = 5;
+            this.approachTimeout = 15.0;
             this.parkOtherRobots = true;
             this.spawnMargin = 600.0;
             this.ballStartDistance = 500.0;
@@ -847,6 +853,8 @@ public class Config extends AbstractCloneable {
         @Override
         public RLDribble clone() {
             RLDribble result = new RLDribble();
+            result.environment = this.environment == null ? EnumRLEnvironment.SIMULATOR : this.environment;
+            result.resetMode = this.resetMode == null ? EnumRLResetMode.TELEPORT : this.resetMode;
             result.targetEpisodes = this.targetEpisodes;
             result.saveData = this.saveData;
             result.outputDir = this.outputDir;
@@ -859,6 +867,7 @@ public class Config extends AbstractCloneable {
             result.settleTime = this.settleTime;
             result.resetPause = this.resetPause;
             result.maxResetRetries = this.maxResetRetries;
+            result.approachTimeout = this.approachTimeout;
             result.parkOtherRobots = this.parkOtherRobots;
             result.spawnMargin = this.spawnMargin;
             result.ballStartDistance = this.ballStartDistance;

@@ -3,6 +3,8 @@ package ai_server_cafe.gui.registry;
 import ai_server_cafe.Main;
 import ai_server_cafe.config.Config;
 import ai_server_cafe.config.EnumRLActionSource;
+import ai_server_cafe.config.EnumRLEnvironment;
+import ai_server_cafe.config.EnumRLResetMode;
 import ai_server_cafe.device.keyboard.InputKeyListenerCafe;
 import ai_server_cafe.game.strategy.XGType;
 import ai_server_cafe.gui.ConfigArea;
@@ -2016,6 +2018,37 @@ public class RegistryInputComponents {
                 return null;
             }
         }, tab).setDisplayType(0, EnumDisplayType.RATIO).setOffset(115));
+
+        // 環境 (シミュレータ / 実機) と初期配置の作り方 (テレポート / ボール位置から)
+        final int envTop = top + pitch * 10 + 4;
+        components.add(new LabelCafe("environment :", left, envTop + 4, tab).setDisplayType(0, EnumDisplayType.RATIO));
+        components.add(new ComboBoxCafe<>(EnumRLEnvironment.values(), cfg.environment, 0.25, envTop, 0.22, 22,
+                new IFuncParam1<Void, EnumRLEnvironment>() {
+                    @Override
+                    @Nullable
+                    public Void function(@Nonnull EnumRLEnvironment arg) {
+                        if (rlConfig().environment != arg) {
+                            rlConfig().environment = arg;
+                            ConfigManager.getInstance().markDirty();
+                        }
+                        return null;
+                    }
+                }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+        components.add(new LabelCafe("reset :", right, envTop + 4, tab).setDisplayType(0, EnumDisplayType.RATIO));
+        components.add(new ComboBoxCafe<>(EnumRLResetMode.values(), cfg.resetMode, 0.66, envTop, 0.25, 22,
+                new IFuncParam1<Void, EnumRLResetMode>() {
+                    @Override
+                    @Nullable
+                    public Void function(@Nonnull EnumRLResetMode arg) {
+                        if (rlConfig().resetMode != arg) {
+                            rlConfig().resetMode = arg;
+                            ConfigManager.getInstance().markDirty();
+                        }
+                        return null;
+                    }
+                }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+        addRLDribbleField(components, "approach limit [s]", left, envTop + 28, false,
+                () -> rlConfig().approachTimeout, v -> rlConfig().approachTimeout = v);
     }
 
     @Nonnull
