@@ -1999,6 +1999,23 @@ public class RegistryInputComponents {
                 () -> rlConfig().seed, v -> rlConfig().seed = (long) v);
         addRLDribbleField(components, "reset pause [s]", right, top + pitch * 8, false,
                 () -> rlConfig().resetPause, v -> rlConfig().resetPause = v);
+
+        // 方策 (actionSourceがPOLICY系のときに使うONNXのパス)
+        components.add(new LabelCafe("policy (.onnx) :", left, top + pitch * 9, tab).setDisplayType(0, EnumDisplayType.RATIO));
+        components.add(new TextAreaCafe(cfg.policyPath, left, top + pitch * 9, 300, 1, new IFuncParam1<Void, String>() {
+            @Override
+            @Nullable
+            public Void function(String s) {
+                if (s == null)
+                    return null;
+                Config.RLDribble editable = ConfigManager.getInstance().getEditableConfig().rlDribble;
+                if (!s.trim().equals(editable.policyPath)) {
+                    editable.policyPath = s.trim();
+                    ConfigManager.getInstance().markDirty();
+                }
+                return null;
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO).setOffset(115));
     }
 
     @Nonnull

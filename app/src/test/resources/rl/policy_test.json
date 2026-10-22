@@ -1,0 +1,15 @@
+{
+  "obs_version": 5,
+  "obs_dim": 43,
+  "action_names": [
+    "vx",
+    "vy",
+    "omega",
+    "dribble",
+    "kick"
+  ],
+  "kick_output": "decision",
+  "algo": "test",
+  "step": null,
+  "source": "random tiny actor for TestRLDribble"
+}

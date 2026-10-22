@@ -759,6 +759,7 @@ public class Config extends AbstractCloneable {
         public String outputDir;            // 保存先 (この下に実行ごとのディレクトリを作る)
         public int robotId;                 // 動かすロボットID (-1なら見えている最初のロボット)
         public EnumRLActionSource actionSource;
+        public String policyPath;           // actionSourceがPOLICY系のときに使う方策 (RL_testのexport_onnx.pyで作る.onnx)
         public long seed;                   // 0なら時刻から決める
         public boolean drawScenario;        // 開始位置とキック目標をフィールドに描画する
         // エピソード
@@ -786,7 +787,7 @@ public class Config extends AbstractCloneable {
         public double kickDetectSpeed;      // キック指令後にボール速度がこれを超えたら蹴ったとみなす [mm/s]
         public double evalMaxTime;          // 蹴った後に結果を待つ最大時間
         public double passSuccessRadius;    // パス: ボールの軌道が目標からこの距離以内を通れば成功
-        // 探索ノイズ (TEACHER_NOISE, vx・vy・omegaのみ)
+        // 探索ノイズ (TEACHER_NOISE / POLICY_NOISE, vx・vy・omegaのみ)
         public double noiseVelStd;          // [mm/s]
         public double noiseOmegaStd;        // [rad/s]
         public double noiseCorrelation;     // AR(1)係数 0なら白色ノイズ
@@ -806,6 +807,7 @@ public class Config extends AbstractCloneable {
             this.outputDir = "rl_data";
             this.robotId = -1;
             this.actionSource = EnumRLActionSource.TEACHER;
+            this.policyPath = "";
             this.seed = 0L;
             this.drawScenario = true;
             this.maxEpisodeTime = 8.0;
@@ -850,6 +852,7 @@ public class Config extends AbstractCloneable {
             result.outputDir = this.outputDir;
             result.robotId = this.robotId;
             result.actionSource = this.actionSource == null ? EnumRLActionSource.TEACHER : this.actionSource;
+            result.policyPath = this.policyPath == null ? "" : this.policyPath;
             result.seed = this.seed;
             result.drawScenario = this.drawScenario;
             result.maxEpisodeTime = this.maxEpisodeTime;

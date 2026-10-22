@@ -56,6 +56,10 @@ dependencies {
     implementation'org.slf4j:slf4j-simple:2.0.16'
     implementation 'com.google.zxing:core:3.5.3'
 
+    // 強化学習の方策 (ONNX) の推論
+    // https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime
+    implementation 'com.microsoft.onnxruntime:onnxruntime:1.17.3'
+
     // Use JUnit Jupiter for testing.
     testImplementation libs.junit.jupiter
 

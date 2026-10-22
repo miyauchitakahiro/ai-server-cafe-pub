@@ -18,9 +18,11 @@ import java.util.List;
  * <p>
  * 2: 蹴る方向・ドリブル開始地点・相手ゴール・相手ロボットを追加
  * 3: 目標をパス・シュートの目標地点にし、行動にキックを追加 (prev_kick, aim, is_shoot)
+ * 4: 見えないボールを正面にあるとみなすのをやめて最後に見えた位置にし、ball_visible を追加
+ * 5: ドリブル開始地点 (dribble_*) をボールから離れたらリセットするようにした (1m制限は触れ続けている間だけ)
  */
 public final class DribbleObservation {
-    public static final int VERSION = 3;
+    public static final int VERSION = 5;
     // 観測に含める相手ロボットの最大数 (足りない分は present=0 で埋める)
     public static final int MAX_OPPONENTS = 3;
 
@@ -46,11 +48,12 @@ public final class DribbleObservation {
                 "ball_to_target_x", "ball_to_target_y",     // パス・シュート目標 - ボール位置
                 "ball_to_target_dist",                      // ボールと目標の距離
                 "have_ball",                                // 幾何的なボール保持 (0/1)
+                "ball_visible",                             // ボールが見えているか (0/1, 0ならボールは最後に見えた位置)
                 "prev_vx", "prev_vy", "prev_omega", "prev_dribble", "prev_kick", // 直前の行動
                 "aim_cos", "aim_sin",                       // ロボットから目標への方向 (ロボットの向きに対する角度)
                 "is_shoot",                                 // シュートか (0:パス 1:シュート)
-                "dribble_start_rel_x", "dribble_start_rel_y", // ドリブル開始地点 - ボール位置 (保持前は0)
-                "dribbling",                                // ドリブル開始地点があるか (0/1)
+                "dribble_start_rel_x", "dribble_start_rel_y", // ドリブル開始地点 - ボール位置 (触れていなければ0)
+                "dribbling",                                // ボールに触れていてドリブル開始地点があるか (0/1)
                 "dribble_dist",                             // ドリブル開始地点からボールまでの距離 (1m制限)
                 "goal_rel_x", "goal_rel_y"                  // 相手ゴール中心 - ロボット位置
         ));
@@ -90,6 +93,7 @@ public final class DribbleObservation {
         obs[i++] = toMeter(ballToTarget.getY());
         obs[i++] = toMeter(s.ballToTargetDistance());
         obs[i++] = s.haveBall() ? 1.0f : 0.0f;
+        obs[i++] = s.ballVisible() ? 1.0f : 0.0f;
         for (int j = 0; j < ACTION_DIM; j++)
             obs[i++] = (float) prevAction[j];
         obs[i++] = (float) FastMath.cos(aimRel);

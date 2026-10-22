@@ -1,10 +1,10 @@
 package ai_server_cafe.game.action;
 
 import ai_server_cafe.config.Config;
-import ai_server_cafe.config.EnumRLActionSource;
 import ai_server_cafe.controller.PIDController;
 import ai_server_cafe.model.game.Command;
 import ai_server_cafe.rl.DribbleObservation;
+import ai_server_cafe.rl.DribblePolicy;
 import ai_server_cafe.rl.DribbleStepState;
 import ai_server_cafe.rl.RLDribbleSession;
 import ai_server_cafe.updater.ConfigManager;
@@ -12,9 +12,12 @@ import ai_server_cafe.util.EnumKickType;
 import ai_server_cafe.util.TeamColor;
 import ai_server_cafe.util.TimeHelper;
 import ai_server_cafe.util.math.KickConverter;
+import ai.onnxruntime.OrtException;
 import org.apache.commons.math3.geometry.euclidean.twod.Vector2D;
 import org.apache.commons.math3.util.FastMath;
 import org.apache.commons.math3.util.Pair;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.Optional;
 import java.util.SplittableRandom;
@@ -23,14 +26,25 @@ import java.util.SplittableRandom;
  * パス・シュートの強化学習用のAction
  * 観測を作ってRLDribbleSessionに渡し、指示に従って行動を出す。
  * <p>
- * 現在は行動の出どころとして既存のActionKickを教師に使う (マニュアルのストレートキック)。
- * キックパワーはパスなら KickConverter.passSpeed、シュートなら rlDribble.shootSpeed から決める。
+ * 行動の出どころは rlDribble.actionSource で選ぶ。
+ * <ul>
+ * <li>TEACHER系: 既存のActionKickを教師に使う (マニュアルのストレートキック)。
+ * キックパワーはパスなら KickConverter.passSpeed、シュートなら rlDribble.shootSpeed から決める。</li>
+ * <li>POLICY系: 学習した方策 (DribblePolicy) に観測を入れて行動を決める。
+ * 方策のkickは蹴るかどうかの判断なので、蹴るときのパワーは教師と同じ式で決める。</li>
+ * </ul>
+ * どちらのときも教師は毎周期動かし、ノイズなしの教師の行動をラベルとして記録する (DAgger)。
+ * 方策が動かしているときも記録するので、教師データに無い状態 (ボールを押し出した後など) で
+ * 教師ならどうするかを学べる。
  * <p>
  * 行動はロボット座標系の速度・角速度・ドリブラー・キックパワーで表し、速度指令(targetVel + targetOmega)としてコントローラに渡す。
  * 教師が角度指令や位置指令を出したときはコントローラと同じ式で速度・角速度に直すので、実際の動きは変わらない。
  */
 public class ActionRLDribble extends AbstractAction {
+    // 保存データの teacher 列の値 (行動の出どころ)
     public static final int TEACHER_KICK = 0;
+    public static final int TEACHER_POLICY = 1;
+    private static final Logger LOGGER = LogManager.getLogger("action-rl-dribble");
     // キックパワーの上限 (KickFlagの値)
     private static final int MAX_KICK_POWER = 255;
 
@@ -79,12 +93,29 @@ public class ActionRLDribble extends AbstractAction {
             case ACT: {
                 this.prepareEpisode(session);
                 final Config.RLDribble cfg = session.getEpisodeConfig();
-                final Command teacherCommand = this.runKick(state, cfg);
-
-                double[] action = this.toAction(teacherCommand, state);
-                if (cfg.actionSource == EnumRLActionSource.TEACHER_NOISE)
+                final Optional<DribblePolicy> policy = session.getPolicy();
+                // 教師 (ActionKick) は実際に動かすかどうかに関わらず毎周期動かして状態を進める
+                final double[] expert = this.toAction(this.runKick(state, cfg), state);
+                double[] action;
+                int source;
+                if (cfg.actionSource.usesPolicy() && policy.isPresent()) {
+                    try {
+                        action = policy.get().act(obs);
+                        action[DribbleObservation.ACTION_DIM - 1] = action[DribbleObservation.ACTION_DIM - 1] >= 0.5
+                                ? this.kickPower(state, cfg) : 0.0;
+                    } catch (OrtException e) {
+                        // 行動を記録しないのでこのエピソードはセッション側で破棄される
+                        LOGGER.error("policy inference failed : {}", e.getMessage());
+                        return new Command().setHalt(true);
+                    }
+                    source = TEACHER_POLICY;
+                } else {
+                    action = expert.clone();
+                    source = TEACHER_KICK;
+                }
+                if (cfg.actionSource.addsNoise())
                     action = this.addNoise(action, cfg);
-                session.onAction(this.color, action, TEACHER_KICK);
+                session.onAction(this.color, action, expert, source);
                 this.prevAction = action;
                 return this.toCommand(action, state);
             }
@@ -95,12 +126,18 @@ public class ActionRLDribble extends AbstractAction {
         }
     }
 
-    private Command runKick(DribbleStepState state, Config.RLDribble cfg) {
+    /**
+     * 蹴るときのパワー (パスは目標までの距離から、シュートは rlDribble.shootSpeed から)
+     */
+    private int kickPower(DribbleStepState state, Config.RLDribble cfg) {
         final double speed = state.shoot() ? cfg.shootSpeed : KickConverter.passSpeed(state.ballPos(), this.target);
-        final int power = KickConverter.toPower(this.id, new Pair<>(EnumKickType.STRAIGHT, speed));
+        return KickConverter.toPower(this.id, new Pair<>(EnumKickType.STRAIGHT, speed));
+    }
+
+    private Command runKick(DribbleStepState state, Config.RLDribble cfg) {
         this.kickTeacher.setWorld(this.world.get());
         this.kickTeacher.setTarget(this.target);
-        this.kickTeacher.kickManually(new Pair<>(EnumKickType.STRAIGHT, power));
+        this.kickTeacher.kickManually(new Pair<>(EnumKickType.STRAIGHT, this.kickPower(state, cfg)));
         this.kickTeacher.setHoldTime(cfg.kickHoldTime);
         return this.kickTeacher.execute();
     }

@@ -1,6 +1,7 @@
 package ai_server_cafe.rl;
 
 import ai_server_cafe.config.Config;
+import ai_server_cafe.config.EnumRLActionSource;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
@@ -30,7 +31,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * 収集したエピソードを保存する
  * <pre>
- * outputDir/yyyyMMdd-HHmmss/
+ * outputDir/teacher/yyyyMMdd-HHmmss/   教師 (ActionKick) が動かしたデータ
+ * outputDir/policy/yyyyMMdd-HHmmss/    学習した方策が動かしたデータ (DAgger用に教師の行動も記録する)
  *   meta.json      列の定義・観測バージョン・収集時の設定
  *   episodes.csv   エピソードごとの集計 (min_target_dist は蹴った後にボールが目標に最も近づいた距離 [mm], 蹴っていなければ -1)
  *   ep_000000.bin  float32 リトルエンディアン, [steps, columns] の行優先配列
@@ -44,12 +46,15 @@ public final class RLDataWriter {
     // 2: teacher_valid列をteacher列に置き換えた
     // 3: 観測バージョン2, kick_theta と dribble_dist 列を追加
     // 4: 観測バージョン3 (パス・シュート), 行動にkick, kick_theta列をis_shoot列に置き換え, episodes.csvにshootとmin_target_distを追加
-    public static final int FORMAT_VERSION = 4;
+    // 5: DAgger用に教師の行動 (expert_*) 列を追加, 教師と方策で保存先を分けた
+    public static final int FORMAT_VERSION = 5;
 
     // obs と action の後ろに続く列
     public static final String[] EXTRA_NAMES = {
             "reward", "is_first", "is_last", "is_terminal",
-            "teacher",          // 行動を出した教師 0:ActionKick -1:なし(最終行)
+            "teacher",          // 行動の出どころ 0:ActionKick 1:学習した方策 -1:なし(最終行)
+            // 同じ観測で教師 (ActionKick) が出す行動 (ノイズなし)。方策が動かしていても記録する (DAgger のラベル)
+            "expert_vx", "expert_vy", "expert_omega", "expert_dribble", "expert_kick",
             "ball_contact",     // シミュレータの接触フィードバック 1/0/-1(不明)
             "ball_visible",
             // 以下はフィールド座標系 (invertなし) [m, rad], 解析用で観測には含めない
@@ -74,7 +79,7 @@ public final class RLDataWriter {
     @Nonnull
     public static RLDataWriter create(@Nonnull Config config, long seed, @Nonnull String captainColor) throws IOException {
         final String name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-        final Path runDir = Paths.get(config.rlDribble.outputDir, name);
+        final Path runDir = Paths.get(config.rlDribble.outputDir, getSourceDir(config.rlDribble.actionSource), name);
         Files.createDirectories(runDir);
         RLDataWriter writer = new RLDataWriter(runDir);
         writer.writeMeta(config, seed, captainColor);
@@ -82,6 +87,14 @@ public final class RLDataWriter {
                 "episode,file,steps,reason,success,return,duration,scenario_seed,shoot,min_target_dist\n", StandardCharsets.UTF_8);
         LOGGER.info("rl data will be saved to {}", runDir.toAbsolutePath());
         return writer;
+    }
+
+    /**
+     * 行動の出どころごとの保存先のディレクトリ名
+     */
+    @Nonnull
+    public static String getSourceDir(@Nonnull EnumRLActionSource source) {
+        return source.usesPolicy() ? "policy" : "teacher";
     }
 
     @Nonnull

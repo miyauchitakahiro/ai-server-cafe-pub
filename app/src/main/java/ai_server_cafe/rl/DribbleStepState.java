@@ -24,10 +24,10 @@ import java.util.Optional;
  *
  * @param target       パス・シュートの目標地点
  * @param shoot        シュートか (falseならパス)
- * @param dribbleStart ボールを保持し始めた地点 (まだ保持していなければempty)
+ * @param dribbleStart ボールに触れ始めた地点 (触れていなければempty)
  * @param goalPos      相手ゴールの中心 (worldの座標系では+x側)
  * @param opponents    フィールド内の相手ロボット (近い順, 最大 DribbleObservation.MAX_OPPONENTS 台)
- * @param ballVisible  ボールがvisionで見えているか (見えていなければロボット前にあるとみなす)
+ * @param ballVisible  ボールがvisionで見えているか (見えていなければボールは最後に見えた位置)
  * @param haveBall     幾何的にボールを保持しているか
  * @param inField      ロボットとボールがフィールド(ゲームエリア)内か
  * @param ballContact  シミュレータのドリブラー接触フィードバック 1:接触 0:非接触 -1:不明
@@ -57,7 +57,7 @@ public record DribbleStepState(
     /**
      * worldから状態を計測する
      *
-     * @param dribbleStart これまでのドリブル開始地点 (emptyで今ボールを保持していれば今のボール位置を開始地点にする)
+     * @param dribbleStart これまでのドリブル開始地点 (emptyで今ボールに触れていれば今のボール位置を開始地点にする)
      * @return 対象ロボットが見えていなければempty
      */
     @Nonnull
@@ -73,9 +73,11 @@ public record DribbleStepState(
         final Vector2D faceBallPos = robotPos.add(MathHelper.getFromPolar(config.toFaceRadius + config.ballRadius, theta));
 
         final boolean ballVisible = !ball.isLost();
-        // ドリブル中はロボットに隠れて見えなくなることがあるのでActionDribbleと同様にロボット前にあるとみなす
-        final Vector2D ballPos = ballVisible ? ball.position() : faceBallPos;
-        final Vector2D ballVel = ballVisible ? ball.velocity() : robot.velocity();
+        // 見えないとき (ロボットの影に入ったときなど) は最後に見えた位置を使う (教師のActionKickと同じ情報)
+        // 正面にあるとみなすと、横や後ろで隠れたボールを保持していると取り違えるため
+        // 速度は分からないので0にする
+        final Vector2D ballPos = ball.position();
+        final Vector2D ballVel = ballVisible ? ball.velocity() : Vector2D.ZERO;
 
         final boolean haveBall = MathHelper.distance2D(ballPos, faceBallPos) < config.rlDribble.holdDistance
                 && MathHelper.inferiorAngle(theta, MathHelper.direction(ballPos, robotPos)) < config.rlDribble.holdAngle;
@@ -94,8 +96,14 @@ public record DribbleStepState(
         if (opponents.size() > DribbleObservation.MAX_OPPONENTS)
             opponents = new ArrayList<>(opponents.subList(0, DribbleObservation.MAX_OPPONENTS));
 
-        final Optional<Vector2D> start = dribbleStart.isPresent() ? dribbleStart
-                : (haveBall ? Optional.of(ballPos) : Optional.empty());
+        // ドリブル (1m制限) はボールに触れ続けている間だけ数える
+        // ロボットとボールの距離がロボット半径 + ボール半径より大きければ離れたとみなして開始地点をリセットする
+        // ボールが見えないとき (ロボットの影など) は位置が古く判断できないので、直前の状態を保つ
+        final boolean touching = ballVisible
+                ? MathHelper.distance2D(robotPos, ballPos) <= config.robotRadius + config.ballRadius
+                : dribbleStart.isPresent();
+        final Optional<Vector2D> start = !touching ? Optional.empty()
+                : (dribbleStart.isPresent() ? dribbleStart : Optional.of(ballPos));
 
         final int ballContact = UpdaterRobotFeedback.getInstance().getBallContact(color, id, FEEDBACK_MAX_AGE);
 
@@ -120,7 +128,7 @@ public record DribbleStepState(
     }
 
     /**
-     * ドリブル開始地点から今のボールまでの距離 (保持していなければ0)
+     * ドリブル開始地点から今のボールまでの距離 (ボールに触れていなければ0)
      */
     public double dribbleDistance() {
         return this.dribbleStart.map(s -> MathHelper.distance2D(s, this.ballPos)).orElse(0.0);

@@ -16,6 +16,7 @@ import org.apache.logging.log4j.Logger;
 
 import javax.annotation.Nonnull;
 import java.io.IOException;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -30,6 +31,8 @@ import java.util.Optional;
  * 課題: 0.5m先のボールに寄って保持し、目標の方向を向いて蹴る。
  * パスはボールの軌道が目標の近くを通れば、シュートはゴールに入れば成功。
  * 蹴る前にボールを保持した地点から dribbleLimit (ルールの1m) を超えて運んだら失敗。
+ * <p>
+ * 行動は教師 (ActionKick) か、学習した方策 (DribblePolicy, actionSourceがPOLICY系のとき) が出す。
  * <p>
  * 座標について: onObservationに渡す状態はActionの座標系(invertされている場合あり、相手ゴールは+x側)。
  * テレポートと保存はフィールド座標系(invertなし)で行う。
@@ -85,6 +88,7 @@ public final class RLDribbleSession {
     private Config config;
     private long baseSeed;
     private Optional<RLDataWriter> writer;
+    private Optional<DribblePolicy> policy;   // actionSourceがPOLICY系のときだけ読み込む
 
     private int targetEpisodes;
     private int episodeIndex;
@@ -101,7 +105,7 @@ public final class RLDribbleSession {
     private double lastStepTime;
     private double resumeTime;          // この時刻まで次のテレポートを待つ
     private double lastKickCommandTime; // 最後にキック指令を出した時刻
-    private Optional<Vector2D> dribbleStart; // ボールを保持し始めた地点 (フィールド座標系)
+    private Optional<Vector2D> dribbleStart; // ボールに触れ始めた地点 (フィールド座標系, 離れたらempty)
     private double episodeReturn;
     private Optional<PendingStep> pending;
     private double[] lastRecordedAction;
@@ -120,6 +124,7 @@ public final class RLDribbleSession {
         final boolean isFirst;
         final double time;
         double[] action;
+        double[] expert;
         int teacher;
 
         PendingStep(float[] obs, DribbleStepState state, boolean invert, boolean isFirst, double time) {
@@ -129,6 +134,7 @@ public final class RLDribbleSession {
             this.isFirst = isFirst;
             this.time = time;
             this.action = null;
+            this.expert = null;
             this.teacher = -1;
         }
     }
@@ -140,6 +146,7 @@ public final class RLDribbleSession {
         this.robotId = -1;
         this.config = ConfigManager.getInstance().getConfig();
         this.writer = Optional.empty();
+        this.policy = Optional.empty();
         this.scenario = Optional.empty();
         this.dribbleStart = Optional.empty();
         this.rows = new ArrayList<>();
@@ -183,6 +190,21 @@ public final class RLDribbleSession {
         if (this.config.rlDribble.passMinDist > this.config.rlDribble.passMaxDist) {
             this.finish("error: passMinDist must not be larger than passMaxDist");
             return;
+        }
+        // 方策は開始のたびに読み直す (学習し直したONNXをそのまま使えるように)
+        this.closePolicy();
+        if (this.config.rlDribble.actionSource.usesPolicy()) {
+            if (this.config.rlDribble.policyPath.isBlank()) {
+                this.finish("error: policy (.onnx) path is empty");
+                return;
+            }
+            try {
+                this.policy = Optional.of(DribblePolicy.load(Paths.get(this.config.rlDribble.policyPath)));
+                LOGGER.info("rl dribble policy loaded : {}", this.policy.get().getPath().toAbsolutePath());
+            } catch (IOException e) {
+                this.finish("error: " + e.getMessage());
+                return;
+            }
         }
         this.baseSeed = this.config.rlDribble.seed != 0 ? this.config.rlDribble.seed : System.currentTimeMillis();
         this.targetEpisodes = FastMath.max(1, this.config.rlDribble.targetEpisodes);
@@ -300,6 +322,14 @@ public final class RLDribbleSession {
         return this.writer;
     }
 
+    /**
+     * 学習した方策 (actionSourceがPOLICY系で収集中のときだけある)
+     */
+    @Nonnull
+    public synchronized Optional<DribblePolicy> getPolicy() {
+        return this.policy;
+    }
+
     public synchronized long getEpisodeSeed() {
         return this.scenario.map(DribbleScenario::seed).orElse(this.baseSeed);
     }
@@ -375,13 +405,16 @@ public final class RLDribbleSession {
      * onObservationがACTを返した周期に実際に送った行動を記録する
      *
      * @param action  DribbleObservation#ACTION_NAMES の順
+     * @param expert  同じ観測で教師 (ActionKick) が出す行動 (ノイズなし, DAggerのラベル)
      * @param teacher 行動を出した教師 (ActionRLDribble#TEACHER_KICK など)
      */
-    public synchronized void onAction(@Nonnull TeamColor color, @Nonnull double[] action, int teacher) {
+    public synchronized void onAction(@Nonnull TeamColor color, @Nonnull double[] action, @Nonnull double[] expert,
+                                      int teacher) {
         if (this.phase != Phase.RUNNING || this.ownerColor.isEmpty() || this.ownerColor.get() != color)
             return;
         this.pending.ifPresent(p -> {
             p.action = action.clone();
+            p.expert = expert.clone();
             p.teacher = teacher;
             if (action[DribbleObservation.ACTION_DIM - 1] > 0.0)
                 this.lastKickCommandTime = p.time;
@@ -456,9 +489,8 @@ public final class RLDribbleSession {
         final double dt = now - this.lastStepTime;
         this.lastStepTime = now;
 
-        // ドリブル開始地点は最初に保持した地点 (エピソード中は更新しない)
-        if (this.dribbleStart.isEmpty() && state.dribbleStart().isPresent())
-            this.dribbleStart = Optional.of(invert ? state.dribbleStart().get().negate() : state.dribbleStart().get());
+        // ドリブル開始地点: ボールに触れ始めた地点。離れたらリセットされ、また触れたらその地点から測る
+        this.dribbleStart = state.dribbleStart().map(p -> invert ? p.negate() : p);
 
         // キック指令の直後にボールが速く動き出したら蹴ったとみなす
         final boolean kicked = now - this.lastKickCommandTime <= KICK_DETECT_WINDOW
@@ -491,14 +523,14 @@ public final class RLDribbleSession {
             if (reason.isPresent())
                 reward += RewardFunction.terminalBonus(cfg, reason.get(), 0.0);
             this.episodeReturn += reward;
-            previousRow = Optional.of(this.makeRow(p.obs, p.action, reward, p.isFirst, false, false, p.teacher, p.state,
+            previousRow = Optional.of(this.makeRow(p.obs, p.action, reward, p.isFirst, false, false, p.expert, p.teacher, p.state,
                     p.invert, p.time - this.episodeStartTime));
             this.lastRecordedAction = p.action;
         }
         this.pending = Optional.empty();
 
         final float[] finalRow = this.makeRow(obs, new double[DribbleObservation.ACTION_DIM], 0.0,
-                previousRow.isEmpty() && this.rows.isEmpty(), true, true, -1, state, invert, now - this.episodeStartTime);
+                previousRow.isEmpty() && this.rows.isEmpty(), true, true, new double[DribbleObservation.ACTION_DIM], -1, state, invert, now - this.episodeStartTime);
         if (kicked) {
             // 結果が出るまで蹴る直前のステップの報酬を保留する
             this.kickRow = previousRow;
@@ -557,7 +589,8 @@ public final class RLDribbleSession {
     }
 
     private float[] makeRow(float[] obs, double[] action, double reward, boolean isFirst, boolean isLast,
-                            boolean isTerminal, int teacher, DribbleStepState s, boolean invert, double time) {
+                            boolean isTerminal, double[] expert, int teacher, DribbleStepState s, boolean invert,
+                            double time) {
         float[] row = new float[RLDataWriter.COLUMNS];
         int i = 0;
         for (float v : obs) row[i++] = v;
@@ -567,6 +600,7 @@ public final class RLDribbleSession {
         row[i++] = isLast ? 1f : 0f;
         row[i++] = isTerminal ? 1f : 0f;
         row[i++] = teacher;
+        for (double v : expert) row[i++] = (float) v;
         row[i++] = s.ballContact();
         row[i++] = s.ballVisible() ? 1f : 0f;
         final double sign = invert ? -1.0 : 1.0;
@@ -639,9 +673,16 @@ public final class RLDribbleSession {
             LOGGER.error("rl dribble : {}", message);
     }
 
+    private void closePolicy() {
+        this.policy.ifPresent(DribblePolicy::close);
+        this.policy = Optional.empty();
+    }
+
     public static void reset() {
-        if (instance != null)
+        if (instance != null) {
             instance.stop();
+            instance.closePolicy();
+        }
         instance = null;
     }
 }

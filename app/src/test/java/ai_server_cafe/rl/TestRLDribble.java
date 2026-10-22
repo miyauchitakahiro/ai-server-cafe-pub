@@ -1,6 +1,7 @@
 package ai_server_cafe.rl;
 
 import ai_server_cafe.config.Config;
+import ai_server_cafe.config.EnumRLActionSource;
 import ai_server_cafe.game.action.ActionRLDribble;
 import ai_server_cafe.gui.VisionArea;
 import ai_server_cafe.gui.interfaces.IGraphicalComponent;
@@ -20,6 +21,8 @@ import ai_server_cafe.updater.ConfigManager;
 import ai_server_cafe.util.TeamColor;
 import ai_server_cafe.util.interfaces.WrapperCloneableMap;
 import ai_server_cafe.util.math.MathHelper;
+import ai.onnxruntime.OrtException;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.apache.commons.math3.geometry.euclidean.twod.Vector2D;
@@ -31,11 +34,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -128,7 +133,8 @@ public class TestRLDribble {
         RLDribbleSession.Directive d = session.onObservation(TeamColor.BLUE, 3, w, false,
                 DribbleObservation.build(s, new double[DribbleObservation.ACTION_DIM]), s, now);
         if (d == RLDribbleSession.Directive.ACT)
-            session.onAction(TeamColor.BLUE, new double[]{1.0, 0.0, 0.0, 12, kick}, ActionRLDribble.TEACHER_KICK);
+            session.onAction(TeamColor.BLUE, new double[]{1.0, 0.0, 0.0, 12, kick}, new double[]{0.5, 0.0, 0.0, 12, kick},
+                    ActionRLDribble.TEACHER_KICK);
         return d;
     }
 
@@ -242,6 +248,24 @@ public class TestRLDribble {
     /* ============================== 観測 ============================== */
 
     @Test
+    void hiddenBallStaysAtLastSeenPosition() {
+        // ロボットの横で影に入ったボールは、最後に見えた位置のまま (正面にあるとはみなさない)
+        Vector2D robotPos = new Vector2D(500, -300);
+        Vector2D side = robotPos.add(new Vector2D(0, 150));
+        World w = world(robotPos, 0.0, Vector2D.ZERO, side, new Vector2D(300, 0), List.of());
+        w.getBall().setLost(true);
+        DribbleStepState s = DribbleStepState.measure(w, TeamColor.BLUE, 3, Vector2D.ZERO, false, Optional.empty(),
+                config()).orElseThrow();
+        float[] obs = DribbleObservation.build(s, new double[DribbleObservation.ACTION_DIM]);
+        assertEquals(0.0f, obs[OBS.indexOf("ball_visible")]);
+        assertEquals(0.0f, obs[OBS.indexOf("have_ball")]);
+        assertEquals(0.0f, obs[OBS.indexOf("ball_rel_x")], 1e-4);
+        assertEquals(0.15f, obs[OBS.indexOf("ball_rel_y")], 1e-4);
+        // 見えないボールの速度は分からないので0 (相対速度はロボット速度の符号反転)
+        assertEquals(0.0f, obs[OBS.indexOf("ball_vel_rel_x")], 1e-4);
+    }
+
+    @Test
     void observationIsInvariantToInversion() {
         Vector2D robotPos = new Vector2D(500, -300);
         double theta = 0.7;
@@ -267,6 +291,7 @@ public class TestRLDribble {
         }
         assertEquals((float) contact() / 1000f, obs[OBS.indexOf("ball_rel_x")], 1e-4);
         assertEquals(1.0f, obs[OBS.indexOf("have_ball")]);
+        assertEquals(1.0f, obs[OBS.indexOf("ball_visible")]);
         assertEquals(1.0f, obs[OBS.indexOf("is_shoot")]);
         // 目標への向き
         final double aim = MathHelper.direction(target, robotPos) - theta;
@@ -390,8 +415,11 @@ public class TestRLDribble {
         assertTrue(writer.awaitTermination(10));
         Path runDir = writer.getRunDir();
         JsonObject meta = JsonParser.parseString(Files.readString(runDir.resolve("meta.json"))).getAsJsonObject();
-        assertEquals(4, meta.get("format_version").getAsInt());
-        assertEquals(3, meta.get("obs_version").getAsInt());
+        assertEquals(RLDataWriter.FORMAT_VERSION, meta.get("format_version").getAsInt());
+        // 教師のデータは teacher ディレクトリに保存する
+        assertEquals("teacher", runDir.getParent().getFileName().toString());
+        assertEquals("policy", RLDataWriter.getSourceDir(EnumRLActionSource.POLICY_NOISE));
+        assertEquals(DribbleObservation.VERSION, meta.get("obs_version").getAsInt());
         assertEquals(RLDataWriter.COLUMNS, meta.get("columns").getAsJsonArray().size());
 
         List<String> csv = Files.readAllLines(runDir.resolve("episodes.csv"), StandardCharsets.UTF_8);
@@ -421,6 +449,10 @@ public class TestRLDribble {
         assertTrue(kickStep[cols.indexOf("reward")] > config().rlDribble.successReward - 1.0);
         assertEquals(0f, rows[0][cols.indexOf("teacher")]);
         assertEquals(-1f, last[cols.indexOf("teacher")]);
+        // 教師の行動 (DAggerのラベル) は実際の行動とは別に記録する
+        assertEquals(1.0f, rows[0][cols.indexOf("vx")]);
+        assertEquals(0.5f, rows[0][cols.indexOf("expert_vx")]);
+        assertEquals(0f, last[cols.indexOf("expert_vx")]);
         assertEquals(first.kickTarget().getX() / 1000.0, rows[0][cols.indexOf("target_x")], 1e-4);
         assertEquals(0f, rows[0][cols.indexOf("is_shoot")]);
         assertTrue(last[cols.indexOf("dribble_dist")] < 1.0f);
@@ -465,6 +497,49 @@ public class TestRLDribble {
         assertTrue(session.getStatusText().contains("success 0%"));
         // 止まったのは保持した地点からおよそ1m
         assertTrue(MathHelper.distance2D(s.ballPos(), mover.ballPos) < config().rlDribble.dribbleLimit + 100.0);
+    }
+
+    @Test
+    void dribbleLimitResetsWhenBallLeaves() {
+        rl().saveData = false;
+        rl().shootRatio = 0.0;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        double now = begin(session, 10.0);
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        Mover mover = new Mover(s);
+        while (!mover.held) {
+            now += CYCLE;
+            mover.move(s.robotTheta());
+            step(session, mover.world(), now);
+        }
+        final Vector2D dir = MathHelper.getFromPolar(1.0, mover.theta);
+        // 0.7m 運ぶ → ボールを離す → また触れて 0.7m 運ぶ (合計1.4mでも触れ続けた距離は1m以下)
+        for (int round = 0; round < 2; round++) {
+            for (int i = 0; i < 42; i++) {
+                now += CYCLE;
+                mover.robotPos = mover.robotPos.add(dir.scalarMultiply(1000.0 * CYCLE));
+                mover.ballPos = facePos(mover.robotPos, mover.theta);
+                mover.robotVel = dir.scalarMultiply(1000.0);
+                step(session, mover.world(), now);
+            }
+            assertTrue(session.getDribbleStart(false).isPresent());
+            // ボールが見えないときは離れたか分からないので開始地点を保つ
+            World hidden = TestRLDribble.world(mover.robotPos, mover.theta, Vector2D.ZERO,
+                    mover.robotPos.add(dir.scalarMultiply(300.0)), Vector2D.ZERO, List.of());
+            hidden.getBall().setLost(true);
+            now += CYCLE;
+            step(session, hidden, now);
+            assertTrue(session.getDribbleStart(false).isPresent());
+            // ロボット半径 + ボール半径より離れたら開始地点はリセットされる
+            mover.ballPos = mover.robotPos.add(dir.scalarMultiply(config().robotRadius + config().ballRadius + 50.0));
+            mover.robotVel = Vector2D.ZERO;
+            now += CYCLE;
+            step(session, mover.world(), now);
+            assertTrue(session.getDribbleStart(false).isEmpty());
+            mover.robotPos = mover.ballPos.subtract(dir.scalarMultiply(contact()));
+        }
+        assertEquals(RLDribbleSession.Phase.RUNNING, session.getPhase(), session.getStatusText());
+        assertEquals(0, session.getCompletedEpisodes());
     }
 
     @Test
@@ -568,6 +643,99 @@ public class TestRLDribble {
             }
         }
         assertEquals(RLDribbleSession.Phase.RUNNING, session.getPhase());
+    }
+
+    /* ============================== 方策 (ONNX) ============================== */
+
+    /**
+     * RL_test の export_onnx.py で書き出した小さな乱数の方策 (隠れ層8)
+     * policy_test_expected.json はPyTorchで同じ観測を入れたときの出力
+     */
+    private static Path testPolicy() throws URISyntaxException {
+        return Paths.get(TestRLDribble.class.getResource("/rl/policy_test.onnx").toURI());
+    }
+
+    @Test
+    void policyMatchesPython() throws Exception {
+        final Path expectedPath = testPolicy().resolveSibling("policy_test_expected.json");
+        final JsonObject expected = JsonParser.parseString(Files.readString(expectedPath)).getAsJsonObject();
+        final JsonArray obsJson = expected.getAsJsonArray("obs");
+        final JsonArray actionJson = expected.getAsJsonArray("action");
+        float[] obs = new float[obsJson.size()];
+        for (int i = 0; i < obs.length; i++) obs[i] = obsJson.get(i).getAsFloat();
+        try (DribblePolicy policy = DribblePolicy.load(testPolicy())) {
+            final double[] action = policy.act(obs);
+            assertEquals(DribbleObservation.ACTION_DIM, action.length);
+            for (int i = 0; i < action.length; i++)
+                assertEquals(actionJson.get(i).getAsDouble(), action[i], 1e-3 * FastMath.max(1.0, FastMath.abs(action[i])));
+        }
+    }
+
+    @Test
+    void policyRejectsOtherObservationVersion(@TempDir Path dir) throws Exception {
+        final Path onnx = dir.resolve("policy.onnx");
+        Files.copy(testPolicy(), onnx);
+        // 情報ファイルが無い
+        assertThrows(IOException.class, () -> DribblePolicy.load(onnx));
+        // 観測バージョンが違う
+        Files.writeString(dir.resolve("policy.json"), String.format("{\"obs_version\": %d, \"obs_dim\": %d}",
+                DribbleObservation.VERSION - 1, DribbleObservation.OBS_DIM));
+        IOException e = assertThrows(IOException.class, () -> DribblePolicy.load(onnx));
+        assertTrue(e.getMessage().contains("obs_version"), e.getMessage());
+        // kick をパワーで出す古い形式
+        Files.writeString(dir.resolve("policy.json"), String.format("{\"obs_version\": %d, \"obs_dim\": %d}",
+                DribbleObservation.VERSION, DribbleObservation.OBS_DIM));
+        e = assertThrows(IOException.class, () -> DribblePolicy.load(onnx));
+        assertTrue(e.getMessage().contains("re-export"), e.getMessage());
+        // ファイルが無い
+        assertThrows(IOException.class, () -> DribblePolicy.load(dir.resolve("none.onnx")));
+    }
+
+    @Test
+    void startFailsWithoutPolicy() {
+        rl().saveData = false;
+        rl().actionSource = EnumRLActionSource.POLICY;
+        rl().policyPath = "none.onnx";
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        assertEquals(RLDribbleSession.Phase.FINISHED, session.getPhase());
+        assertTrue(session.getStatusText().contains("policy not found"), session.getStatusText());
+
+        rl().policyPath = "";
+        session.start();
+        assertTrue(session.getStatusText().contains("path is empty"), session.getStatusText());
+    }
+
+    @Test
+    void actionUsesPolicy() throws URISyntaxException, IOException, OrtException {
+        rl().saveData = false;
+        rl().settleTime = 0.0;
+        rl().actionSource = EnumRLActionSource.POLICY;
+        rl().policyPath = testPolicy().toString();
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        assertTrue(session.getPolicy().isPresent(), session.getStatusText());
+        ActionRLDribble action = new ActionRLDribble(3, TeamColor.BLUE);
+        action.setWorld(world(Vector2D.ZERO, 0.0, Vector2D.ZERO));
+        action.update(0);
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        action.setTarget(s.kickTarget());
+        final World start = world(s.robotPos(), s.robotTheta(), s.ballPos());
+        Command command = null;
+        for (int i = 1; i < 5 && session.getPhase() != RLDribbleSession.Phase.RUNNING; i++) {
+            action.setWorld(start);
+            command = action.update(i);
+        }
+        assertEquals(RLDribbleSession.Phase.RUNNING, session.getPhase());
+        // 最初の行動は直前の行動0の観測から決まる
+        DribbleStepState state = DribbleStepState.measure(start, TeamColor.BLUE, 3, s.kickTarget(), s.shoot(),
+                Optional.empty(), config()).orElseThrow();
+        try (DribblePolicy policy = DribblePolicy.load(testPolicy())) {
+            final double[] expected = policy.act(DribbleObservation.build(state, new double[DribbleObservation.ACTION_DIM]));
+            assertNotNull(command);
+            assertEquals(expected[2], command.getTargetOmega(), 1e-6);
+            assertEquals(FastMath.round(expected[3]), command.getDribble());
+        }
     }
 
     /* ============================== 描画 ============================== */
