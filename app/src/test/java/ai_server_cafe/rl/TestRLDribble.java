@@ -2,7 +2,10 @@ package ai_server_cafe.rl;
 
 import ai_server_cafe.config.Config;
 import ai_server_cafe.config.EnumRLActionSource;
+import ai_server_cafe.config.EnumRLEnvironment;
+import ai_server_cafe.config.EnumRLResetMode;
 import ai_server_cafe.game.action.ActionRLDribble;
+import ai_server_cafe.game.planner.thread.ThreadPathPlanner;
 import ai_server_cafe.gui.VisionArea;
 import ai_server_cafe.gui.interfaces.IGraphicalComponent;
 import ai_server_cafe.gui.item.DrawRLDribble;
@@ -382,6 +385,169 @@ public class TestRLDribble {
 
     /* ============================== セッション ============================== */
 
+    /* ============================== リセット方式 FROM_BALL ============================== */
+
+    @Test
+    void scenarioFromBall() {
+        Field field = new Field();
+        final Config c = config();
+        // ゴールから遠いボール: ボール位置はそのままで、シュートはできないので全部パス
+        final Vector2D far = new Vector2D(-1000, 500);
+        for (long seed = 1; seed < 200; seed++) {
+            DribbleScenario a = DribbleScenario.generateFromBall(seed, field, c, 1.0, far).orElseThrow();
+            assertEquals(far, a.ballPos());
+            assertFalse(a.shoot());
+            assertEquals(c.rlDribble.ballStartDistance, MathHelper.distance2D(a.robotPos(), a.ballPos()), 1e-6);
+            assertEquals(a.robotTheta(), MathHelper.direction(a.ballPos(), a.robotPos()), 1e-6);
+            assertTrue(FastMath.abs(a.robotPos().getX()) <= field.getMaxX() - c.rlDribble.spawnMargin + 1e-6);
+            assertTrue(FastMath.abs(a.robotPos().getY()) <= field.getMaxY() - c.rlDribble.spawnMargin + 1e-6);
+        }
+        // シュートできる位置のボールならシュートも混ざる
+        final Vector2D near = new Vector2D(field.getPenaltyFrontX() - 1000, 0);
+        int shoots = 0;
+        for (long seed = 1; seed < 200; seed++) {
+            if (DribbleScenario.generateFromBall(seed, field, c, 1.0, near).orElseThrow().shoot())
+                shoots++;
+        }
+        assertTrue(shoots > 50 && shoots < 150, "shoots " + shoots);
+        // 余白より外のボールは使えない (人が戻すのを待つ)
+        assertTrue(DribbleScenario.generateFromBall(1, field, c, 1.0,
+                new Vector2D(field.getMaxX() - 100, 0)).isEmpty());
+    }
+
+    @Test
+    void fromBallWaitsThenApproachesAndStarts() {
+        rl().saveData = false;
+        rl().resetMode = EnumRLResetMode.FROM_BALL;
+        Field field = new Field();
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        final Vector2D ball = new Vector2D(-1000, 500);
+        double now = 10.0;
+        // ボールが転がっている間は待つ
+        assertEquals(RLDribbleSession.Directive.HALT, step(session,
+                world(Vector2D.ZERO, 0.0, Vector2D.ZERO, ball, new Vector2D(500, 0), List.of()), now));
+        assertTrue(session.getStatusText().contains("ball to stop"), session.getStatusText());
+        // 使える範囲の外なら待つ
+        now += 0.1;
+        assertEquals(RLDribbleSession.Directive.HALT, step(session,
+                world(Vector2D.ZERO, 0.0, new Vector2D(field.getMaxX() - 100, 0)), now));
+        assertTrue(session.getStatusText().contains("place the ball"), session.getStatusText());
+        assertEquals(RLDribbleSession.Phase.RESETTING, session.getPhase());
+        // 止まっているボールから初期配置を決めて、開始位置へ移動する
+        now += 0.1;
+        assertEquals(RLDribbleSession.Directive.MOVE, step(session, world(Vector2D.ZERO, 0.0, ball), now));
+        assertEquals(RLDribbleSession.Phase.APPROACHING, session.getPhase());
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        assertEquals(ball, s.ballPos());
+        assertEquals(s.robotPos(), session.getStartPose(false).orElseThrow().getFirst());
+        // invertされたActionには反転した開始位置を渡す
+        assertEquals(s.robotPos().negate(), session.getStartPose(true).orElseThrow().getFirst());
+        // 着くまでは移動
+        now += 0.1;
+        assertEquals(RLDribbleSession.Directive.MOVE, step(session, world(Vector2D.ZERO, 0.0, ball), now));
+        // 着いたら静止待ちを経てエピソード開始
+        now += 0.1;
+        assertEquals(RLDribbleSession.Directive.SETTLE, step(session, world(s.robotPos(), s.robotTheta(), ball), now));
+        assertEquals(RLDribbleSession.Phase.SETTLING, session.getPhase());
+        settle(session, now);
+        assertTrue(session.getStartPose(false).isEmpty());
+    }
+
+    @Test
+    void fromBallRegeneratesWhenBallMovesOrTimeout() {
+        rl().saveData = false;
+        rl().resetMode = EnumRLResetMode.FROM_BALL;
+        rl().approachTimeout = 1.0;
+        rl().maxResetRetries = 1;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        final Vector2D ball = new Vector2D(-1000, 500);
+        assertEquals(RLDribbleSession.Directive.MOVE, step(session, world(Vector2D.ZERO, 0.0, ball), 10.0));
+        // 移動中にボールが動いたら作り直す
+        final Vector2D moved = ball.add(new Vector2D(300, 0));
+        assertEquals(RLDribbleSession.Directive.HALT, step(session, world(Vector2D.ZERO, 0.0, moved), 10.1));
+        assertEquals(RLDribbleSession.Phase.RESETTING, session.getPhase());
+        assertEquals(RLDribbleSession.Directive.MOVE, step(session, world(Vector2D.ZERO, 0.0, moved), 10.2));
+        assertEquals(moved, session.getScenario().orElseThrow().ballPos());
+        // 時間内に着かなければ作り直し、続けて失敗したら止める
+        double now = 10.2;
+        for (int i = 0; i < 40 && session.getPhase() != RLDribbleSession.Phase.FINISHED; i++) {
+            now += 0.1;
+            step(session, world(Vector2D.ZERO, 0.0, moved), now);
+        }
+        assertEquals(RLDribbleSession.Phase.FINISHED, session.getPhase());
+        assertTrue(session.getStatusText().contains("start position"), session.getStatusText());
+    }
+
+    @Test
+    void realWaitsWhileOtherRobotsAreInField() {
+        rl().saveData = false;
+        rl().environment = EnumRLEnvironment.REAL;
+        rl().resetMode = EnumRLResetMode.FROM_BALL;
+        ConfigManager.getInstance().getEditableConfig().radioTypes = new int[]{EnumRadioType.KIKS.getId()};
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        final Vector2D ball = new Vector2D(-1000, 500);
+        assertEquals(RLDribbleSession.Directive.HALT, step(session,
+                world(Vector2D.ZERO, 0.0, Vector2D.ZERO, ball, Vector2D.ZERO, List.of(new Vector2D(2000, 0))), 10.0));
+        assertTrue(session.getStatusText().contains("remove other robots"), session.getStatusText());
+        // 出てもらえば始まる
+        assertEquals(RLDribbleSession.Directive.MOVE, step(session, world(Vector2D.ZERO, 0.0, ball), 10.1));
+    }
+
+    @Test
+    void actionMovesToStartPosition() {
+        rl().saveData = false;
+        rl().resetMode = EnumRLResetMode.FROM_BALL;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        ActionRLDribble action = new ActionRLDribble(3, TeamColor.BLUE);
+        action.setWorld(world(Vector2D.ZERO, 0.0, new Vector2D(-1000, 500)));
+        Command command = action.update(0);
+        assertEquals(RLDribbleSession.Phase.APPROACHING, session.getPhase(), session.getStatusText());
+        // 経路計画で開始位置へ向かう指令が出る
+        assertFalse(command.isHalt());
+        assertTrue(command.getTargetPos().isPresent() || command.getTargetVel().getNorm() > 0.0);
+    }
+
+    @Test
+    void invertedActionMovesToStartPosition() throws InterruptedException {
+        // 反転したチーム: Actionにはinvertしたworldが渡され、返す指令はフィールド座標系に戻される
+        // 経路計画の結果は別スレッドで計算されるので、テストでもスレッドを動かす
+        rl().saveData = false;
+        rl().resetMode = EnumRLResetMode.FROM_BALL;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        ActionRLDribble action = new ActionRLDribble(3, TeamColor.BLUE);
+        action.setInvert(true);
+        final Vector2D robotPos = new Vector2D(1000, 0);
+        final World w = world(robotPos, 0.0, new Vector2D(-1000, 500)).getInverted();
+        ThreadPathPlanner planner = ThreadPathPlanner.getInstance(TeamColor.BLUE);
+        planner.start();
+        try {
+            Command command = null;
+            for (int i = 0; i < 100; i++) {
+                action.setWorld(w);
+                command = action.update(i);
+                if (command.getTargetPos().isPresent() && MathHelper.distance2D(command.getTargetPos().get(), robotPos) > 10.0)
+                    break;
+                Thread.sleep(20);
+            }
+            assertEquals(RLDribbleSession.Phase.APPROACHING, session.getPhase(), session.getStatusText());
+            // フィールド座標系の開始位置の方へ向かう (反転が二重にかかると反対側へ向かう)
+            final Vector2D start = session.getStartPose(false).orElseThrow().getFirst();
+            final Vector2D toward = command.getTargetPos().orElseThrow().subtract(robotPos);
+            assertTrue(toward.getNorm() > 10.0, command.toString());
+            assertTrue(toward.dotProduct(start.subtract(robotPos)) > 0.0, command + " start " + start);
+        } finally {
+            planner.terminate();
+            ThreadPathPlanner.reset();
+        }
+    }
+
+    /* ============================== セッション ============================== */
+
     @Test
     void passSucceedsThenMisses(@TempDir Path tempDir) throws Exception {
         rl().outputDir = tempDir.toString();
@@ -617,6 +783,20 @@ public class TestRLDribble {
         session.start();
         assertTrue(session.getStatusText().contains("passMinDist"), session.getStatusText());
         assertEquals(RLDribbleSession.Phase.FINISHED, session.getPhase());
+
+        // 実機: KIKSの無線が必要で、テレポートは使えない
+        rl().passMinDist = 1500.0;
+        rl().environment = EnumRLEnvironment.REAL;
+        session.start();
+        assertTrue(session.getStatusText().contains("KIKS"), session.getStatusText());
+        ConfigManager.getInstance().getEditableConfig().radioTypes = new int[]{EnumRadioType.KIKS.getId()};
+        rl().resetMode = EnumRLResetMode.TELEPORT;
+        session.start();
+        assertTrue(session.getStatusText().contains("TELEPORT"), session.getStatusText());
+        rl().resetMode = EnumRLResetMode.FROM_BALL;
+        rl().saveData = false;
+        session.start();
+        assertEquals(RLDribbleSession.Phase.RESETTING, session.getPhase(), session.getStatusText());
     }
 
     /* ============================== Action ============================== */

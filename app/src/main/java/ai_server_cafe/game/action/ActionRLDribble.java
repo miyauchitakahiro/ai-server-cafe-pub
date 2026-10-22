@@ -2,6 +2,7 @@ package ai_server_cafe.game.action;
 
 import ai_server_cafe.config.Config;
 import ai_server_cafe.controller.PIDController;
+import ai_server_cafe.model.field.obstacle.base.ObstacleCircle;
 import ai_server_cafe.model.game.Command;
 import ai_server_cafe.rl.DribbleObservation;
 import ai_server_cafe.rl.DribblePolicy;
@@ -19,6 +20,7 @@ import org.apache.commons.math3.util.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.SplittableRandom;
 
@@ -45,10 +47,13 @@ public class ActionRLDribble extends AbstractAction {
     public static final int TEACHER_KICK = 0;
     public static final int TEACHER_POLICY = 1;
     private static final Logger LOGGER = LogManager.getLogger("action-rl-dribble");
+    // 開始位置へ移動するとき、ボールの周りにこれだけ余白を取って避ける [mm] (開始位置はボールから0.5m)
+    private static final double APPROACH_BALL_MARGIN = 250.0;
     // キックパワーの上限 (KickFlagの値)
     private static final int MAX_KICK_POWER = 255;
 
     private Vector2D target;
+    private final ActionMove approachMove;
     private ActionKick kickTeacher;
     private long teacherSerial;
     private double[] prevAction;
@@ -60,6 +65,7 @@ public class ActionRLDribble extends AbstractAction {
     public ActionRLDribble(int id, TeamColor color) {
         super(id, color);
         this.target = Vector2D.ZERO;
+        this.approachMove = new ActionMove(id, color);
         this.kickTeacher = new ActionKick(id, color);
         this.teacherSerial = -1;
         this.prevAction = new double[DribbleObservation.ACTION_DIM];
@@ -85,6 +91,10 @@ public class ActionRLDribble extends AbstractAction {
         final RLDribbleSession.Directive directive = session.onObservation(this.color, this.id, this.world.get(),
                 this.isInvert(), obs, state, TimeHelper.now());
         switch (directive) {
+            case MOVE: {
+                this.prevAction = new double[DribbleObservation.ACTION_DIM];
+                return this.moveToStart(session, state, config);
+            }
             case SETTLE: {
                 this.prevAction = new double[DribbleObservation.ACTION_DIM];
                 return new Command().setTargetVel(Vector2D.ZERO).setTargetOmega(0.0)
@@ -124,6 +134,23 @@ public class ActionRLDribble extends AbstractAction {
                 return new Command().setHalt(true);
             }
         }
+    }
+
+    /**
+     * 経路計画でボールを避けながら開始位置へ移動する (リセット方式 FROM_BALL)
+     */
+    private Command moveToStart(RLDribbleSession session, DribbleStepState state, Config config) {
+        final Optional<Pair<Vector2D, Double>> pose = session.getStartPose(this.isInvert());
+        if (pose.isEmpty())
+            return new Command().setHalt(true);
+        this.approachMove.setPos(pose.get().getFirst());
+        this.approachMove.setAngle(pose.get().getSecond());
+        // 障害物は毎周期作り直す (他のRoleと同じ使い方)
+        WithPlanner<ActionMove> planner = new WithPlanner<>(this.approachMove, this.id, this.color,
+                List.of(new ObstacleCircle(state.ballPos(), config.ballRadius, APPROACH_BALL_MARGIN)));
+        // worldも開始位置もこのActionの座標系なので、反転はこのActionのupdateで1回だけかける (plannerには設定しない)
+        planner.setWorld(this.world.get());
+        return planner.update(this.now);
     }
 
     /**

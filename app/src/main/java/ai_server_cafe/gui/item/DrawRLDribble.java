@@ -1,6 +1,7 @@
 package ai_server_cafe.gui.item;
 
 import ai_server_cafe.config.Config;
+import ai_server_cafe.config.EnumRLResetMode;
 import ai_server_cafe.gui.VisionArea;
 import ai_server_cafe.gui.interfaces.IContainerCafe;
 import ai_server_cafe.gui.interfaces.IGraphicalComponent;
@@ -11,6 +12,7 @@ import ai_server_cafe.gui.item.basic.StringCafe;
 import ai_server_cafe.records.ver1.RecordData1;
 import ai_server_cafe.rl.DribbleScenario;
 import ai_server_cafe.rl.RLDribbleSession;
+import ai_server_cafe.updater.UpdaterWorld;
 import ai_server_cafe.util.gui.ColorHelper;
 import ai_server_cafe.util.math.MathHelper;
 import org.apache.commons.math3.geometry.euclidean.twod.Vector2D;
@@ -30,12 +32,17 @@ public class DrawRLDribble implements IItemDraw {
     private static final List<String> KEYS = List.of("rl_dribble_path", "rl_dribble_start_robot",
             "rl_dribble_start_heading", "rl_dribble_start_ball", "rl_dribble_start_label", "rl_dribble_target",
             "rl_dribble_target_cross1", "rl_dribble_target_cross2", "rl_dribble_target_label", "rl_dribble_limit");
+    private static final List<String> AREA_KEYS = List.of("rl_dribble_area0", "rl_dribble_area1", "rl_dribble_area2",
+            "rl_dribble_area3");
 
     @Override
     public void init(Class<? extends IContainerCafe> area,
             LinkedHashMap<String, IGraphicalComponent> graphicalComponents) {
         if (area != VisionArea.class) return;
         for (String key : KEYS) {
+            graphicalComponents.putLast(key, new NoneCafe());
+        }
+        for (String key : AREA_KEYS) {
             graphicalComponents.putLast(key, new NoneCafe());
         }
     }
@@ -47,6 +54,7 @@ public class DrawRLDribble implements IItemDraw {
             return;
         }
         final RLDribbleSession session = RLDribbleSession.getInstance();
+        this.drawArea(graphicalComponents, config, session);
         Optional<DribbleScenario> scenario = session.getDisplayScenario();
         if (!config.rlDribble.drawScenario || scenario.isEmpty()) {
             for (String key : KEYS) {
@@ -89,6 +97,28 @@ public class DrawRLDribble implements IItemDraw {
         final Vector2D limitCenter = session.getDisplayDribbleStart().map(p -> flip(p, invert)).orElse(ballPos);
         graphicalComponents.put("rl_dribble_limit", new CircleCafe(ColorHelper.ROLE_ORANGE,
                 limitCenter.getX(), limitCenter.getY(), config.rlDribble.dribbleLimit, false, 10.0F));
+    }
+
+    /**
+     * FROM_BALL で収集中なら、ボールを置ける範囲を描く (この外にボールがあると人が戻すまで待つ)
+     * ボール待ちでまだシナリオが無いときにも描く
+     */
+    private void drawArea(LinkedHashMap<String, IGraphicalComponent> graphicalComponents, Config config,
+                          RLDribbleSession session) {
+        if (!config.rlDribble.drawScenario || config.rlDribble.resetMode != EnumRLResetMode.FROM_BALL
+                || session.getPhase() == RLDribbleSession.Phase.IDLE) {
+            for (String key : AREA_KEYS)
+                graphicalComponents.put(key, new NoneCafe());
+            return;
+        }
+        final boolean invert = config.visibility.invertVisible;
+        final double[] a = DribbleScenario.getSpawnArea(UpdaterWorld.getInstance().getField(), config);
+        final Vector2D[] corners = {new Vector2D(a[0], a[2]), new Vector2D(a[1], a[2]),
+                new Vector2D(a[1], a[3]), new Vector2D(a[0], a[3])};
+        for (int i = 0; i < 4; i++) {
+            graphicalComponents.put(AREA_KEYS.get(i), new LineCafe(flip(corners[i], invert),
+                    flip(corners[(i + 1) % 4], invert), ColorHelper.ARCHIVE_SKY, 8.0F));
+        }
     }
 
     private static Vector2D flip(Vector2D pos, boolean invert) {

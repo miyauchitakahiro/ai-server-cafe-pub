@@ -112,7 +112,10 @@ public record DribbleStepState(
                 ballVisible, haveBall, inField, ballContact));
     }
 
-    private static boolean isInside(@Nonnull Field field, @Nonnull Vector2D pos) {
+    /**
+     * フィールド (ゲームエリア) 内か
+     */
+    static boolean isInside(@Nonnull Field field, @Nonnull Vector2D pos) {
         return FastMath.abs(pos.getX()) <= field.getMaxX() && FastMath.abs(pos.getY()) <= field.getMaxY();
     }
 

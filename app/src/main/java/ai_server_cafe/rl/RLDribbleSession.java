@@ -1,6 +1,8 @@
 package ai_server_cafe.rl;
 
 import ai_server_cafe.config.Config;
+import ai_server_cafe.config.EnumRLEnvironment;
+import ai_server_cafe.config.EnumRLResetMode;
 import ai_server_cafe.model.field.Field;
 import ai_server_cafe.model.field.World;
 import ai_server_cafe.network.radio.EnumRadioType;
@@ -40,8 +42,9 @@ import java.util.Optional;
 public final class RLDribbleSession {
     public enum Phase {
         IDLE,       // 収集していない
-        RESETTING,  // 次の周期で初期配置にテレポートする
-        SETTLING,   // テレポート後、静止させて待つ
+        RESETTING,  // 次の周期で初期配置を作る (テレポート、またはボール位置から開始位置を決める)
+        APPROACHING,// FROM_BALL: ロボットが自走して開始位置へ向かう
+        SETTLING,   // 開始位置で静止させて待つ
         RUNNING,    // エピソード実行中 (蹴るまで)
         EVALUATING, // 蹴った後、ボールの行方を見て成否を決める
         FINISHED    // 指定回数に達した、またはエラーで停止
@@ -53,6 +56,7 @@ public final class RLDribbleSession {
     public enum Directive {
         HALT,   // 停止
         SETTLE, // その場でドリブラーを回して待つ
+        MOVE,   // 開始位置へ移動する (ボールを避けて, getStartPose)
         ACT     // 行動を決めて onAction を呼ぶ
     }
 
@@ -71,6 +75,13 @@ public final class RLDribbleSession {
     private static final double MAX_CALL_GAP = 0.5;
     // テレポート後のロボット位置のずれの許容値 [mm]
     private static final double SPAWN_TOLERANCE = 150.0;
+    // FROM_BALL: 開始位置に着いたとみなすロボットの位置・向き・速度の許容値 [mm, rad, mm/s]
+    private static final double ARRIVE_DISTANCE = 50.0;
+    private static final double ARRIVE_ANGLE = 0.1;
+    private static final double ARRIVE_SPEED = 100.0;
+    // FROM_BALL: ボールがこの速度未満なら止まっている、作ったときの位置からこれ以上動いたら作り直す [mm/s, mm]
+    private static final double BALL_STILL_SPEED = 100.0;
+    private static final double BALL_MOVED_DISTANCE = 100.0;
     // キック指令からこの時間内にボールが速くなったら蹴ったとみなす [s]
     private static final double KICK_DETECT_WINDOW = 0.3;
     // ボールが目標から最も近づいた距離よりこれだけ離れたら通り過ぎたとみなす [mm]
@@ -174,14 +185,21 @@ public final class RLDribbleSession {
             return;
         }
         this.config = ConfigManager.getInstance().getConfig();
-        boolean simulatorEnabled = false;
-        for (int type : this.config.radioTypes) {
-            if (type == EnumRadioType.SIMULATOR.getId())
-                simulatorEnabled = true;
-        }
-        if (!simulatorEnabled) {
-            this.finish("error: SIMULATOR transmitter (radioTypes=3) is not enabled");
-            return;
+        // 環境ごとに必要な送信先とリセット方法を確かめる
+        if (this.config.rlDribble.environment == EnumRLEnvironment.SIMULATOR) {
+            if (!this.isRadioEnabled(EnumRadioType.SIMULATOR)) {
+                this.finish("error: SIMULATOR transmitter (radioTypes=3) is not enabled");
+                return;
+            }
+        } else {
+            if (!this.isRadioEnabled(EnumRadioType.KIKS)) {
+                this.finish("error: KIKS transmitter (radioTypes=0) is not enabled");
+                return;
+            }
+            if (this.config.rlDribble.resetMode == EnumRLResetMode.TELEPORT) {
+                this.finish("error: TELEPORT reset cannot be used on REAL robots (use FROM_BALL)");
+                return;
+            }
         }
         if (this.config.rlDribble.lostDistance <= DribbleScenario.getBallStartDistance(this.config)) {
             this.finish("error: lostDistance must be larger than ballStartDistance");
@@ -376,7 +394,9 @@ public final class RLDribbleSession {
 
         switch (this.phase) {
             case RESETTING:
-                return this.reset(color, id, world, invert, now);
+                return this.reset(color, id, world, invert, state, now);
+            case APPROACHING:
+                return this.approach(state, invert, now);
             case SETTLING:
                 if (now - this.phaseStartTime < this.config.rlDribble.settleTime)
                     return Directive.SETTLE;
@@ -423,7 +443,7 @@ public final class RLDribbleSession {
 
     /* ============================== 内部処理 ============================== */
 
-    private Directive reset(TeamColor color, int id, World world, boolean invert, double now) {
+    private Directive reset(TeamColor color, int id, World world, boolean invert, DribbleStepState state, double now) {
         this.discardEpisode();
         if (now < this.resumeTime) {
             // エピソード終了直後はしばらく停止させる
@@ -431,8 +451,9 @@ public final class RLDribbleSession {
             return Directive.HALT;
         }
         this.config = ConfigManager.getInstance().getConfig();
+        // 使わないロボットをタッチラインの外へ (シミュレータのみ)
         List<Pair<TeamColor, Integer>> parked = new ArrayList<>();
-        if (this.config.rlDribble.parkOtherRobots) {
+        if (this.config.rlDribble.parkOtherRobots && this.config.rlDribble.environment == EnumRLEnvironment.SIMULATOR) {
             for (TeamColor c : TeamColor.values()) {
                 world.getFriendlyRobotMap(c).keySet().stream().sorted().forEach(robotId -> {
                     if (c != color || robotId != id)
@@ -443,6 +464,9 @@ public final class RLDribbleSession {
         final long seed = this.baseSeed + this.episodeIndex * 1000L + this.resetAttempt;
         // Actionの座標系では相手ゴールが+x側なので、invertされていればフィールド座標系では-x側
         final double goalSign = invert ? -1.0 : 1.0;
+        if (this.config.rlDribble.resetMode == EnumRLResetMode.FROM_BALL)
+            return this.resetFromBall(color, id, world, invert, state, parked, seed, goalSign, now);
+
         Optional<DribbleScenario> generated = DribbleScenario.generate(seed, world.getField(), this.config, goalSign);
         if (generated.isEmpty()) {
             this.finish("error: scenario cannot be generated (check margins and distances)");
@@ -455,6 +479,108 @@ public final class RLDribbleSession {
         this.phase = Phase.SETTLING;
         this.status = "settling";
         return Directive.SETTLE;
+    }
+
+    /**
+     * 今のボール位置から初期配置を決め、ロボットを開始位置へ向かわせる (リセット方式 FROM_BALL)
+     * ボールが止まっていない・使える範囲に無い・ほかのロボットがフィールドにいる (実機) ときは止めて待つ
+     */
+    private Directive resetFromBall(TeamColor color, int id, World world, boolean invert, DribbleStepState state,
+                                    List<Pair<TeamColor, Integer>> parked, long seed, double goalSign, double now) {
+        if (!parked.isEmpty())
+            SimulatorTransmitter.getInstance().sendControl(DribbleScenario.buildPark(world.getField(), parked));
+        // 実機ではほかのロボットを動かせないので、フィールドから出してもらうまで待つ (方策は相手のいない状況しか知らない)
+        if (this.config.rlDribble.environment == EnumRLEnvironment.REAL && hasOtherRobotsInField(world, color, id)) {
+            this.status = "waiting: remove other robots from the field";
+            return Directive.HALT;
+        }
+        if (!state.ballVisible() || state.ballVel().getNorm() > BALL_STILL_SPEED) {
+            this.status = "waiting for the ball to stop";
+            return Directive.HALT;
+        }
+        final Vector2D ball = invert ? state.ballPos().negate() : state.ballPos();
+        Optional<DribbleScenario> generated = DribbleScenario.generateFromBall(seed, world.getField(), this.config,
+                goalSign, ball);
+        if (generated.isEmpty()) {
+            // 場外・壁際などにあるので人が戻すのを待つ (使える範囲はGUIに描く)
+            this.status = "waiting: place the ball inside the area";
+            return Directive.HALT;
+        }
+        this.scenario = generated;
+        this.dribbleStart = Optional.empty();
+        this.phaseStartTime = now;
+        this.phase = Phase.APPROACHING;
+        this.status = "approaching";
+        return Directive.MOVE;
+    }
+
+    /**
+     * 開始位置へ向かう (リセット方式 FROM_BALL)
+     */
+    private Directive approach(DribbleStepState state, boolean invert, double now) {
+        final DribbleScenario sc = this.scenario.orElseThrow();
+        final Vector2D ball = invert ? state.ballPos().negate() : state.ballPos();
+        if (state.ballVisible() && MathHelper.distance2D(ball, sc.ballPos()) > BALL_MOVED_DISTANCE) {
+            // 移動中にボールが動いた (触ってしまった等) ので作り直す
+            this.phase = Phase.RESETTING;
+            return Directive.HALT;
+        }
+        if (now - this.phaseStartTime > this.config.rlDribble.approachTimeout) {
+            this.resetAttempt++;
+            if (this.resetAttempt > this.config.rlDribble.maxResetRetries) {
+                this.finish("error: could not reach the start position " + this.resetAttempt + " times");
+                return Directive.HALT;
+            }
+            this.phase = Phase.RESETTING;
+            return Directive.HALT;
+        }
+        final Vector2D robot = invert ? state.robotPos().negate() : state.robotPos();
+        final double theta = invert ? MathHelper.wrapPI(state.robotTheta() + FastMath.PI) : state.robotTheta();
+        if (MathHelper.distance2D(robot, sc.robotPos()) < ARRIVE_DISTANCE
+                && MathHelper.inferiorAngle(theta, sc.robotTheta()) < ARRIVE_ANGLE
+                && state.robotVel().getNorm() < ARRIVE_SPEED) {
+            this.phaseStartTime = now;
+            this.phase = Phase.SETTLING;
+            this.status = "settling";
+            return Directive.SETTLE;
+        }
+        return Directive.MOVE;
+    }
+
+    /**
+     * 開始位置と向き (FROM_BALLで移動中のみ)
+     * @param invert Actionの座標系がinvertされているか
+     */
+    @Nonnull
+    public synchronized Optional<Pair<Vector2D, Double>> getStartPose(boolean invert) {
+        if (this.phase != Phase.APPROACHING || this.scenario.isEmpty())
+            return Optional.empty();
+        final DribbleScenario sc = this.scenario.get();
+        return Optional.of(invert ? new Pair<>(sc.robotPos().negate(), MathHelper.wrapPI(sc.robotTheta() + FastMath.PI))
+                : new Pair<>(sc.robotPos(), sc.robotTheta()));
+    }
+
+    /**
+     * 対象のロボット以外がフィールド内にいるか
+     */
+    private static boolean hasOtherRobotsInField(World world, TeamColor color, int id) {
+        for (TeamColor c : TeamColor.values()) {
+            for (var entry : world.getFriendlyRobotMap(c).entrySet()) {
+                if (c == color && entry.getKey() == id)
+                    continue;
+                if (DribbleStepState.isInside(world.getField(), entry.getValue().getRobot().position()))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isRadioEnabled(EnumRadioType radio) {
+        for (int type : this.config.radioTypes) {
+            if (type == radio.getId())
+                return true;
+        }
+        return false;
     }
 
     private boolean isSettled(DribbleStepState state, boolean invert) {

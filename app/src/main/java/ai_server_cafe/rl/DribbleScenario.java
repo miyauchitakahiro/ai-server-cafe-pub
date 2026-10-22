@@ -40,6 +40,39 @@ public record DribbleScenario(long seed, Vector2D robotPos, double robotTheta, V
      */
     @Nonnull
     public static Optional<DribbleScenario> generate(long seed, @Nonnull Field field, @Nonnull Config config, double goalSign) {
+        return generate(seed, field, config, goalSign, Optional.empty());
+    }
+
+    /**
+     * 今ボールがある位置を基準に初期配置を作る (テレポートできない実機用, リセット方式 FROM_BALL)
+     * ロボットの開始位置と目標だけを決め、ボールは動かさない。
+     * シュートにしたエピソードでもボールの位置からシュートできなければパスにする。
+     *
+     * @param ballPos 今のボール位置 (フィールド座標系)
+     * @return ボールがフィールドの余白より内側に無ければempty (人がボールを戻すのを待つ)
+     */
+    @Nonnull
+    public static Optional<DribbleScenario> generateFromBall(long seed, @Nonnull Field field, @Nonnull Config config,
+                                                             double goalSign, @Nonnull Vector2D ballPos) {
+        return generate(seed, field, config, goalSign, Optional.of(ballPos));
+    }
+
+    /**
+     * ボールを使える範囲 (フィールド座標系の minX, maxX, minY, maxY)
+     */
+    @Nonnull
+    public static double[] getSpawnArea(@Nonnull Field field, @Nonnull Config config) {
+        final double margin = config.rlDribble.spawnMargin;
+        return new double[]{field.getMinX() + margin, field.getMaxX() - margin,
+                field.getMinY() + margin, field.getMaxY() - margin};
+    }
+
+    /**
+     * @param fixedBall ボール位置を決めておくとき (FROM_BALL)。emptyならボール位置もランダムに決める (TELEPORT)
+     */
+    @Nonnull
+    private static Optional<DribbleScenario> generate(long seed, @Nonnull Field field, @Nonnull Config config,
+                                                      double goalSign, @Nonnull Optional<Vector2D> fixedBall) {
         final Config.RLDribble cfg = config.rlDribble;
         // 連続したシードでも偏らないようにSplittableRandomを使う (java.util.Randomは最初の値が偏る)
         final SplittableRandom rng = new SplittableRandom(seed);
@@ -49,25 +82,34 @@ public record DribbleScenario(long seed, Vector2D robotPos, double robotTheta, V
         final double maxY = field.getMaxY() - cfg.spawnMargin;
         if (minX >= maxX || minY >= maxY)
             return Optional.empty();
+        if (fixedBall.isPresent() && !inside(fixedBall.get(), minX, maxX, minY, maxY))
+            return Optional.empty();
 
-        final boolean shoot = rng.nextDouble() < cfg.shootRatio;
         final double ballDist = getBallStartDistance(config);
         final double sign = goalSign >= 0.0 ? 1.0 : -1.0;
         final Vector2D goal = new Vector2D(sign * field.getMaxX(), 0.0);
         // シュート時のボールの範囲 (ゴールからの距離で表す)
         final double shootNearX = field.getMaxX() - field.getPenaltyLength() - PENALTY_MARGIN;
+        boolean shoot = rng.nextDouble() < cfg.shootRatio;
+        if (shoot && fixedBall.isPresent()) {
+            // 決まったボール位置からシュートできる範囲か (ゴールに近すぎず遠すぎない)
+            final double x = sign * fixedBall.get().getX();
+            shoot = x >= field.getMaxX() - cfg.shootMaxDist && x <= shootNearX
+                    && MathHelper.distance2D(fixedBall.get(), goal) <= cfg.shootMaxDist;
+        }
         for (int i = 0; i < MAX_TRIALS; i++) {
             final double theta = uniform(rng, -FastMath.PI, FastMath.PI);
             final Vector2D ballPos;
             final Vector2D kickTarget;
             if (shoot) {
-                ballPos = new Vector2D(sign * uniform(rng, field.getMaxX() - cfg.shootMaxDist, shootNearX), uniform(rng, minY, maxY));
+                ballPos = fixedBall.orElseGet(() -> new Vector2D(sign * uniform(rng, field.getMaxX() - cfg.shootMaxDist, shootNearX),
+                        uniform(rng, minY, maxY)));
                 kickTarget = goal.add(new Vector2D(0.0,
                         uniform(rng, -0.5, 0.5) * cfg.shootAimWidth * field.getGoalWidth()));
                 if (MathHelper.distance2D(ballPos, goal) > cfg.shootMaxDist)
                     continue;
             } else {
-                ballPos = new Vector2D(uniform(rng, minX, maxX), uniform(rng, minY, maxY));
+                ballPos = fixedBall.orElseGet(() -> new Vector2D(uniform(rng, minX, maxX), uniform(rng, minY, maxY)));
                 kickTarget = ballPos.add(MathHelper.getFromPolar(uniform(rng, cfg.passMinDist, cfg.passMaxDist),
                         uniform(rng, -FastMath.PI, FastMath.PI)));
                 if (!inside(kickTarget, minX, maxX, minY, maxY))
@@ -94,6 +136,20 @@ public record DribbleScenario(long seed, Vector2D robotPos, double robotTheta, V
      */
     public static boolean isHoldingStart(@Nonnull Config config) {
         return config.rlDribble.ballStartDistance <= config.toFaceRadius + config.ballRadius + BALL_GAP;
+    }
+
+    /**
+     * 使わないロボットだけをタッチラインの外に並べる (シミュレータでリセット方式 FROM_BALL のとき)
+     */
+    @Nonnull
+    public static SslSimulationControl.SimulatorControl buildPark(@Nonnull Field field,
+                                                                 @Nonnull List<Pair<TeamColor, Integer>> parked) {
+        SslSimulationControl.SimulatorControl.Builder builder = SslSimulationControl.SimulatorControl.newBuilder();
+        for (int i = 0; i < parked.size(); i++) {
+            builder.addTeleportRobot(teleportRobot(parked.get(i).getFirst(), parked.get(i).getSecond(),
+                    getParkPosition(field, i), FastMath.PI / 2.0));
+        }
+        return builder.build();
     }
 
     /**
