@@ -632,6 +632,10 @@ public class TestRLDribble {
         assertEquals(RLDataWriter.FORMAT_VERSION, meta.get("format_version").getAsInt());
         // 教師のデータは teacher ディレクトリに保存する
         assertEquals("teacher", runDir.getParent().getFileName().toString());
+        // シミュレータのデータは sim の下に保存し、meta.json にも環境を残す
+        assertEquals("sim", runDir.getParent().getParent().getFileName().toString());
+        assertEquals("SIMULATOR", meta.get("environment").getAsString());
+        assertEquals("real", RLDataWriter.getEnvironmentDir(EnumRLEnvironment.REAL));
         assertEquals("policy", RLDataWriter.getSourceDir(EnumRLActionSource.POLICY_NOISE));
         assertEquals(DribbleObservation.VERSION, meta.get("obs_version").getAsInt());
         assertEquals(RLDataWriter.COLUMNS, meta.get("columns").getAsJsonArray().size());

@@ -2,10 +2,12 @@ package ai_server_cafe.rl;
 
 import ai_server_cafe.config.Config;
 import ai_server_cafe.config.EnumRLActionSource;
+import ai_server_cafe.config.EnumRLEnvironment;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import org.apache.commons.math3.geometry.euclidean.twod.Vector2D;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -24,6 +26,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -31,10 +34,16 @@ import java.util.concurrent.TimeUnit;
 /**
  * 収集したエピソードを保存する
  * <pre>
- * outputDir/teacher/yyyyMMdd-HHmmss/   教師 (ActionKick) が動かしたデータ
- * outputDir/policy/yyyyMMdd-HHmmss/    学習した方策が動かしたデータ (DAgger用に教師の行動も記録する)
+ * outputDir/{sim|real}/teacher/yyyyMMdd-HHmmss/   教師 (ActionKick) が動かしたデータ
+ * outputDir/{sim|real}/policy/yyyyMMdd-HHmmss/    学習した方策が動かしたデータ (DAgger用に教師の行動も記録する)
+ * sim はシミュレータ、real は実機 (meta.json の environment にも記録する)
  *   meta.json      列の定義・観測バージョン・収集時の設定
  *   episodes.csv   エピソードごとの集計 (min_target_dist は蹴った後にボールが目標に最も近づいた距離 [mm], 蹴っていなければ -1)
+ *                  蹴った後の様子 (蹴っていなければ空欄):
+ *                    kick_offset    蹴る直前のボールの横ずれ (ロボット座標系のy, 左が+) [mm]
+ *                    kick_max_speed 蹴った後のボールの最高速度 [mm/s]
+ *                    ball_end_x/y   結果が決まったときのボール位置 (フィールド座標系) [mm]
+ *                    eval_end       結果の決まり方 GOAL / NEAR_TARGET (成功), STOPPED / PASSED / OUT / TIME (外れ)
  *   ep_000000.bin  float32 リトルエンディアン, [steps, columns] の行優先配列
  * </pre>
  * 行の意味はRLDSと同じ: reward[t] は action[t] の結果として得た報酬。
@@ -47,6 +56,7 @@ public final class RLDataWriter {
     // 3: 観測バージョン2, kick_theta と dribble_dist 列を追加
     // 4: 観測バージョン3 (パス・シュート), 行動にkick, kick_theta列をis_shoot列に置き換え, episodes.csvにshootとmin_target_distを追加
     // 5: DAgger用に教師の行動 (expert_*) 列を追加, 教師と方策で保存先を分けた
+    //    (後から episodes.csv の後ろに kick_offset 〜 eval_end 列を追加。前の列は変わらないので版は同じ)
     public static final int FORMAT_VERSION = 5;
 
     // obs と action の後ろに続く列
@@ -79,14 +89,24 @@ public final class RLDataWriter {
     @Nonnull
     public static RLDataWriter create(@Nonnull Config config, long seed, @Nonnull String captainColor) throws IOException {
         final String name = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-        final Path runDir = Paths.get(config.rlDribble.outputDir, getSourceDir(config.rlDribble.actionSource), name);
+        final Path runDir = Paths.get(config.rlDribble.outputDir, getEnvironmentDir(config.rlDribble.environment),
+                getSourceDir(config.rlDribble.actionSource), name);
         Files.createDirectories(runDir);
         RLDataWriter writer = new RLDataWriter(runDir);
         writer.writeMeta(config, seed, captainColor);
         Files.writeString(runDir.resolve("episodes.csv"),
-                "episode,file,steps,reason,success,return,duration,scenario_seed,shoot,min_target_dist\n", StandardCharsets.UTF_8);
+                "episode,file,steps,reason,success,return,duration,scenario_seed,shoot,min_target_dist,"
+                        + "kick_offset,kick_max_speed,ball_end_x,ball_end_y,eval_end\n", StandardCharsets.UTF_8);
         LOGGER.info("rl data will be saved to {}", runDir.toAbsolutePath());
         return writer;
+    }
+
+    /**
+     * 環境ごとの保存先のディレクトリ名
+     */
+    @Nonnull
+    public static String getEnvironmentDir(@Nonnull EnumRLEnvironment environment) {
+        return environment == EnumRLEnvironment.REAL ? "real" : "sim";
     }
 
     /**
@@ -124,6 +144,8 @@ public final class RLDataWriter {
         meta.addProperty("created", LocalDateTime.now().toString());
         meta.addProperty("seed", seed);
         meta.addProperty("captain_color", captainColor);
+        meta.addProperty("environment", config.rlDribble.environment.name());
+        meta.addProperty("reset_mode", config.rlDribble.resetMode.name());
         JsonObject configs = new JsonObject();
         configs.add("rlDribble", gson.toJsonTree(config.rlDribble));
         configs.add("dribbleState", gson.toJsonTree(config.dribbleState));
@@ -138,11 +160,31 @@ public final class RLDataWriter {
     }
 
     /**
+     * 蹴った後のボールの様子 (外れた原因を調べるため episodes.csv に残す)
+     *
+     * @param offset   蹴る直前のボールの横ずれ [mm]
+     * @param maxSpeed 蹴った後のボールの最高速度 [mm/s]
+     * @param endPos   結果が決まったときのボール位置 (フィールド座標系)
+     * @param end      結果の決まり方
+     */
+    public record KickResult(double offset, double maxSpeed, Optional<Vector2D> endPos, String end) {
+        public static final KickResult NONE = new KickResult(Double.NaN, Double.NaN, Optional.empty(), "");
+
+        String toCsv() {
+            if (Double.isNaN(this.offset))
+                return ",,,,";
+            return String.format(Locale.ROOT, "%.1f,%.0f,%s,%s,%s", this.offset, this.maxSpeed,
+                    this.endPos.map(p -> String.format(Locale.ROOT, "%.0f", p.getX())).orElse(""),
+                    this.endPos.map(p -> String.format(Locale.ROOT, "%.0f", p.getY())).orElse(""), this.end);
+        }
+    }
+
+    /**
      * エピソードを非同期で保存する
      */
     public void writeEpisode(int index, @Nonnull List<float[]> rows, @Nonnull String reason, boolean success,
                              double episodeReturn, double duration, long scenarioSeed, boolean shoot,
-                             double minTargetDistance) {
+                             double minTargetDistance, @Nonnull KickResult kick) {
         final List<float[]> copied = List.copyOf(rows);
         this.executor.submit(() -> {
             final String fileName = String.format("ep_%06d.bin", index);
@@ -153,9 +195,9 @@ public final class RLDataWriter {
             try (OutputStream out = Files.newOutputStream(this.runDir.resolve(fileName))) {
                 out.write(buffer.array());
                 Files.writeString(this.runDir.resolve("episodes.csv"),
-                        String.format(Locale.ROOT, "%d,%s,%d,%s,%d,%.6f,%.4f,%d,%d,%.1f%n", index, fileName, copied.size(),
+                        String.format(Locale.ROOT, "%d,%s,%d,%s,%d,%.6f,%.4f,%d,%d,%.1f,%s%n", index, fileName, copied.size(),
                                 reason, success ? 1 : 0, episodeReturn, duration, scenarioSeed, shoot ? 1 : 0,
-                                minTargetDistance),
+                                minTargetDistance, kick.toCsv()),
                         StandardCharsets.UTF_8, StandardOpenOption.APPEND);
             } catch (IOException e) {
                 LOGGER.error("failed to write episode {} : {}", index, e.getMessage());
