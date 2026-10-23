@@ -497,6 +497,54 @@ public class TestRLDribble {
     }
 
     @Test
+    void realStopsAfterEachEpisodeUntilResume() {
+        rl().saveData = false;
+        rl().environment = EnumRLEnvironment.REAL;
+        rl().resetMode = EnumRLResetMode.FROM_BALL;
+        rl().maxEpisodeTime = 0.2;
+        ConfigManager.getInstance().getEditableConfig().radioTypes = new int[]{EnumRadioType.KIKS.getId()};
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        final Vector2D ball = new Vector2D(-1000, 500);
+        double now = 10.0;
+        assertEquals(RLDribbleSession.Directive.MOVE, step(session, world(Vector2D.ZERO, 0.0, ball), now));
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        final World atStart = world(s.robotPos(), s.robotTheta(), ball);
+        now += 0.1;
+        assertEquals(RLDribbleSession.Directive.SETTLE, step(session, atStart, now));
+        now = settle(session, now);
+        // 蹴らずに時間切れで1回終わる
+        while (session.getCompletedEpisodes() == 0) {
+            now += CYCLE;
+            step(session, atStart, now);
+        }
+        // Resumeを押すまでは、待ち時間が過ぎても止まったまま
+        for (int i = 0; i < 3; i++) {
+            now += 1.0;
+            assertEquals(RLDribbleSession.Directive.HALT, step(session, world(Vector2D.ZERO, 0.0, ball), now));
+            assertTrue(session.getStatusText().contains("Resume"), session.getStatusText());
+        }
+        session.resume();
+        now += 0.1;
+        assertEquals(RLDribbleSession.Directive.MOVE, step(session, world(Vector2D.ZERO, 0.0, ball), now));
+        assertFalse(session.isWaitingResume());
+    }
+
+    @Test
+    void simulatorDoesNotWaitForResume() {
+        rl().saveData = false;
+        rl().maxEpisodeTime = 0.2;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        double now = begin(session, 10.0);
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        while (session.getCompletedEpisodes() == 0) {
+            now += CYCLE;
+            step(session, world(s.robotPos(), s.robotTheta(), s.ballPos()), now);
+        }
+        assertFalse(session.isWaitingResume());
+    }
+
+    @Test
     void actionMovesToStartPosition() {
         rl().saveData = false;
         rl().resetMode = EnumRLResetMode.FROM_BALL;
@@ -913,9 +961,54 @@ public class TestRLDribble {
         try (DribblePolicy policy = DribblePolicy.load(testPolicy())) {
             final double[] expected = policy.act(DribbleObservation.build(state, new double[DribbleObservation.ACTION_DIM]));
             assertNotNull(command);
-            assertEquals(expected[2], command.getTargetOmega(), 1e-6);
+            // 角速度は止まった状態から1周期で上げられる分 (accelToTargetVelAngular) に制限される
+            final Config.PIDController ctrl = config().controllerConfig;
+            final double maxStep = ctrl.accelToTargetVelAngular * config().getCycleTime();
+            assertEquals(FastMath.copySign(FastMath.min(FastMath.abs(expected[2]), maxStep), expected[2]),
+                    command.getTargetOmega(), 1e-6);
+            assertTrue(command.getTargetVel().getNorm() <= ctrl.brakeToTargetVelocity * config().getCycleTime() + 1e-6);
             assertEquals(FastMath.round(expected[3]), command.getDribble());
         }
+    }
+
+    @Test
+    void actionRespectsControllerLimits() {
+        // 教師の行動でも速度・加速度はコントローラの上限 (Config.controllerConfig) を超えない
+        rl().saveData = false;
+        rl().settleTime = 0.0;
+        rl().actionSource = EnumRLActionSource.TEACHER_NOISE;
+        rl().noiseVelStd = 3000.0;
+        rl().noiseOmegaStd = 20.0;
+        rl().noiseCorrelation = 0.0;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        session.start();
+        ActionRLDribble action = new ActionRLDribble(3, TeamColor.BLUE);
+        action.setWorld(world(Vector2D.ZERO, 0.0, Vector2D.ZERO));
+        action.update(0);
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        action.setTarget(s.kickTarget());
+        final World start = world(s.robotPos(), s.robotTheta(), s.ballPos());
+        final Config.PIDController ctrl = config().controllerConfig;
+        final double cycle = config().getCycleTime();
+        Vector2D prevVel = Vector2D.ZERO;
+        double prevOmega = 0.0;
+        int acted = 0;
+        for (int i = 1; i < 40; i++) {
+            action.setWorld(start);
+            Command command = action.update(i);
+            if (session.getPhase() != RLDribbleSession.Phase.RUNNING || command.isHalt())
+                continue;
+            acted++;
+            final Vector2D vel = command.getTargetVel();
+            assertTrue(vel.getNorm() <= ctrl.velocityMax + 1e-6, vel.toString());
+            assertTrue(FastMath.abs(command.getTargetOmega()) <= ctrl.velAngularMax + 1e-6);
+            assertTrue(vel.subtract(prevVel).getNorm() <= FastMath.max(ctrl.accelToTargetVelocity, ctrl.brakeToTargetVelocity) * cycle + 1e-6,
+                    "accel " + vel.subtract(prevVel).getNorm() / cycle);
+            assertTrue(FastMath.abs(command.getTargetOmega() - prevOmega) <= ctrl.accelToTargetVelAngular * cycle + 1e-6);
+            prevVel = vel;
+            prevOmega = command.getTargetOmega();
+        }
+        assertTrue(acted > 10, "acted " + acted);
     }
 
     /* ============================== 描画 ============================== */

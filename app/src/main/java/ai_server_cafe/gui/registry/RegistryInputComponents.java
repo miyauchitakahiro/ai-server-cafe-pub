@@ -1903,7 +1903,16 @@ public class RegistryInputComponents {
                 return null;
             }
         }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
-        components.add(new SwitchBoxCafe("save data", 0.4, cfg.saveData, 20, 0.52, 6,
+        // 実機では1回終わるごとに止まるので、ボールやロボットを確かめてから押して次へ進める
+        components.add(new ButtonCafe("Resume", 0.76, 5, 0.2, 22, new IFuncParam1<Void, Boolean>() {
+            @Override
+            @Nullable
+            public Void function(Boolean aBoolean) {
+                RLDribbleSession.getInstance().resume();
+                return null;
+            }
+        }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
+        components.add(new SwitchBoxCafe("save data", 0.4, cfg.saveData, 20, 0.52, 77,
                 ColorHelper.SWITCH_GRAY, ColorHelper.ARCHIVE_SKY, ColorHelper.LINE_WHITE, new IFuncParam1<Void, Boolean>() {
             @Override
             @Nullable

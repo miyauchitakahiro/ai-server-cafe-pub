@@ -115,6 +115,7 @@ public final class RLDribbleSession {
     private double episodeStartTime;
     private double lastStepTime;
     private double resumeTime;          // この時刻まで次のテレポートを待つ
+    private boolean waitingResume;      // 実機: 1回終わるごとに止めて、GUIのResumeを待つ
     private double lastKickCommandTime; // 最後にキック指令を出した時刻
     private Optional<Vector2D> dribbleStart; // ボールに触れ始めた地点 (フィールド座標系, 離れたらempty)
     private double episodeReturn;
@@ -232,6 +233,7 @@ public final class RLDribbleSession {
         this.ownerColor = Optional.empty();
         this.lastCallTime = 0.0;
         this.resumeTime = 0.0;
+        this.waitingResume = false;
         this.discardEpisode();
         this.writer = Optional.empty();
         this.scenario = Optional.empty();
@@ -252,6 +254,20 @@ public final class RLDribbleSession {
         this.phase = Phase.IDLE;
         this.status = String.format("stopped (%d episodes)", this.episodeIndex);
         LOGGER.info("rl dribble collection stopped");
+    }
+
+    /**
+     * 実機で1回終わって止まっているのを再開する (GUIのResumeボタン)
+     */
+    public synchronized void resume() {
+        if (!this.waitingResume)
+            return;
+        this.waitingResume = false;
+        LOGGER.info("rl dribble resumed at episode {}", this.episodeIndex);
+    }
+
+    public synchronized boolean isWaitingResume() {
+        return this.waitingResume;
     }
 
     public synchronized Phase getPhase() {
@@ -445,6 +461,11 @@ public final class RLDribbleSession {
 
     private Directive reset(TeamColor color, int id, World world, boolean invert, DribbleStepState state, double now) {
         this.discardEpisode();
+        if (this.waitingResume) {
+            // 実機: 人がボールやロボットの様子を確かめてからResumeで次へ進む
+            this.status = "waiting for Resume";
+            return Directive.HALT;
+        }
         if (now < this.resumeTime) {
             // エピソード終了直後はしばらく停止させる
             this.status = "pausing";
@@ -763,6 +784,8 @@ public final class RLDribbleSession {
             LOGGER.info("rl dribble collection finished : {} episodes, success {}", this.episodeIndex, this.successCount);
         } else {
             this.phase = Phase.RESETTING;
+            // 実機では1回ごとに止めて、Resumeを押すまで次を始めない
+            this.waitingResume = this.config.rlDribble.environment == EnumRLEnvironment.REAL;
         }
     }
 

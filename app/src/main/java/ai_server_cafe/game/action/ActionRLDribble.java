@@ -14,6 +14,7 @@ import ai_server_cafe.util.TeamColor;
 import ai_server_cafe.util.TimeHelper;
 import ai_server_cafe.util.math.KickConverter;
 import ai.onnxruntime.OrtException;
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D;
 import org.apache.commons.math3.geometry.euclidean.twod.Vector2D;
 import org.apache.commons.math3.util.FastMath;
 import org.apache.commons.math3.util.Pair;
@@ -61,6 +62,8 @@ public class ActionRLDribble extends AbstractAction {
     private SplittableRandom noiseRandom;
     // 角度指令・位置指令を速度に直すため (状態を持たない計算のみ使う)
     private PIDController commandConverter;
+    // 速度・加速度の制限用 (直前の指令を状態として持つので、エピソードごとに作り直す)
+    private PIDController limiter;
 
     public ActionRLDribble(int id, TeamColor color) {
         super(id, color);
@@ -73,6 +76,7 @@ public class ActionRLDribble extends AbstractAction {
         this.noiseRandom = new SplittableRandom();
         final Config config = ConfigManager.getInstance().getConfig();
         this.commandConverter = new PIDController(config.getCycleTime(), config.controllerConfig);
+        this.limiter = new PIDController(config.getCycleTime(), config.controllerConfig);
     }
 
     @Override
@@ -125,6 +129,7 @@ public class ActionRLDribble extends AbstractAction {
                 }
                 if (cfg.actionSource.addsNoise())
                     action = this.addNoise(action, cfg);
+                action = this.applyLimits(action, state);
                 session.onAction(this.color, action, expert, source);
                 this.prevAction = action;
                 return this.toCommand(action, state);
@@ -196,9 +201,28 @@ public class ActionRLDribble extends AbstractAction {
         this.kickTeacher = new ActionKick(this.id, this.color);
         final Config config = ConfigManager.getInstance().getConfig();
         this.commandConverter = new PIDController(config.getCycleTime(), config.controllerConfig);
+        this.limiter = new PIDController(config.getCycleTime(), config.controllerConfig);
         this.noiseRandom = new SplittableRandom(session.getEpisodeSeed());
         for (int i = 0; i < this.noise.length; i++)
             this.noise[i] = 0.0;
+    }
+
+    /**
+     * vx, vy, omega の速度・加速度を、コントローラ (PIDController) と同じ式と Config (controllerConfig) の上限で制限する
+     * velocityMax, velAngularMax, accelToTargetVelocity, brakeToTargetVelocity, accelToTargetVelAngular を使う。
+     * 送った後にコントローラで切られる分を先に切っておくので、記録する行動と実際に送られる速度が一致する。
+     */
+    private double[] applyLimits(double[] action, DribbleStepState state) {
+        // コントローラはフィールド座標系で制限するので、ロボット座標系の行動を変換してから通す
+        final Vector2D fieldVel = state.toField(new Vector2D(action[0] * 1000.0, action[1] * 1000.0));
+        final Vector3D limited = this.limiter.getVelClampedWithAccel(
+                new Vector3D(fieldVel.getX(), fieldVel.getY(), action[2]));
+        final Vector2D localVel = state.toLocal(new Vector2D(limited.getX(), limited.getY()));
+        double[] result = action.clone();
+        result[0] = localVel.getX() / 1000.0;
+        result[1] = localVel.getY() / 1000.0;
+        result[2] = limited.getZ();
+        return result;
     }
 
     /**
