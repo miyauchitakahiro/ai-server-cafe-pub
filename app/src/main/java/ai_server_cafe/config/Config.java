@@ -782,6 +782,9 @@ public class Config extends AbstractCloneable {
         // キック (教師ActionKick)
         public double shootSpeed;           // シュートのボール速度 [mm/s] (パスはKickConverter.passSpeed)
         public int kickHoldTime;            // ActionKickが向きを合わせてから蹴るまで待つフレーム数
+        public double kickCenterTolerance;  // ボールの横ずれ (ロボット座標系のy) がこれを超えていたら蹴らない [mm] (0以下で無効)
+        public int kickStableFrames;        // ボールを保持して中心にある状態がこのフレーム数続いてから蹴る (0で無効, 実機では逆効果だったので既定は0)
+        public double ballWanderLimit;      // 蹴る前にボールが初期位置からこれ以上動いたら失敗 [mm] (0以下で無効)
         // 終了判定
         public double dribbleLimit;         // ボールを保持した地点からこの距離を超えて運んだら失敗 (ルールの1m制限)
         public double holdDistance;         // ドリブラー前のボール位置からのずれがこれ未満で保持
@@ -821,7 +824,7 @@ public class Config extends AbstractCloneable {
             this.maxResetRetries = 5;
             this.approachTimeout = 15.0;
             this.parkOtherRobots = true;
-            this.spawnMargin = 600.0;
+            this.spawnMargin = 300.0;
             this.ballStartDistance = 500.0;
             this.shootRatio = 0.5;
             this.passMinDist = 1500.0;
@@ -830,6 +833,9 @@ public class Config extends AbstractCloneable {
             this.shootAimWidth = 0.6;
             this.shootSpeed = 6000.0;
             this.kickHoldTime = 20;
+            this.kickCenterTolerance = 15.0;
+            this.kickStableFrames = 0;
+            this.ballWanderLimit = 2000.0;
             this.dribbleLimit = 1000.0;
             this.holdDistance = 100.0;
             this.holdAngle = 0.8;
@@ -878,6 +884,9 @@ public class Config extends AbstractCloneable {
             result.shootAimWidth = this.shootAimWidth;
             result.shootSpeed = this.shootSpeed;
             result.kickHoldTime = this.kickHoldTime;
+            result.kickCenterTolerance = this.kickCenterTolerance;
+            result.kickStableFrames = this.kickStableFrames;
+            result.ballWanderLimit = this.ballWanderLimit;
             result.dribbleLimit = this.dribbleLimit;
             result.holdDistance = this.holdDistance;
             result.holdAngle = this.holdAngle;

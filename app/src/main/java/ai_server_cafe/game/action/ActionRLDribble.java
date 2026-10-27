@@ -58,6 +58,7 @@ public class ActionRLDribble extends AbstractAction {
     private ActionKick kickTeacher;
     private long teacherSerial;
     private double[] prevAction;
+    private int stableFrames;   // ボールを保持して中心にある状態が続いているフレーム数
     private final double[] noise;
     private SplittableRandom noiseRandom;
     // 角度指令・位置指令を速度に直すため (状態を持たない計算のみ使う)
@@ -129,6 +130,13 @@ public class ActionRLDribble extends AbstractAction {
                 }
                 if (cfg.actionSource.addsNoise())
                     action = this.addNoise(action, cfg);
+                // キックの条件: ボールを保持して中心にある状態が kickStableFrames 続くまでは蹴らずに待つ
+                // (教師のラベルにも同じ条件をかけて、方策も「落ち着いてから蹴る」を学ぶようにする)
+                this.stableFrames = nextStableFrames(this.stableFrames, state, cfg);
+                if (!this.isKickAllowed(state, cfg)) {
+                    waitInsteadOfKick(action, state);
+                    waitInsteadOfKick(expert, state);
+                }
                 action = this.applyLimits(action, state);
                 session.onAction(this.color, action, expert, source);
                 this.prevAction = action;
@@ -156,6 +164,45 @@ public class ActionRLDribble extends AbstractAction {
         // worldも開始位置もこのActionの座標系なので、反転はこのActionのupdateで1回だけかける (plannerには設定しない)
         planner.setWorld(this.world.get());
         return planner.update(this.now);
+    }
+
+    /**
+     * ボールを保持して中心にある状態が続いたフレーム数を更新する
+     */
+    public static int nextStableFrames(int prev, DribbleStepState state, Config.RLDribble cfg) {
+        return state.haveBall() && isBallCentered(state, cfg) ? prev + 1 : 0;
+    }
+
+    /**
+     * 蹴ってよいか: ボールが中心にあり、kickStableFrames > 0 ならその状態が続いている
+     * 実機では見えている位置と蹴る瞬間の位置がずれるので、ボールが落ち着くのを待ってから蹴る
+     */
+    private boolean isKickAllowed(DribbleStepState state, Config.RLDribble cfg) {
+        return isBallCentered(state, cfg) && this.stableFrames >= cfg.kickStableFrames;
+    }
+
+    /**
+     * 蹴りたいが条件を満たしていないとき: キックを止め、ボールを保持しているなら前へ押さない
+     * (押し続けるとボールがこぼれて、追いかけたまま運んでしまうため)
+     */
+    private static void waitInsteadOfKick(double[] action, DribbleStepState state) {
+        final int kick = DribbleObservation.ACTION_DIM - 1;
+        if (action[kick] <= 0.0)
+            return;
+        action[kick] = 0.0;
+        if (state.haveBall())
+            action[0] = FastMath.min(action[0], 0.0);
+    }
+
+    /**
+     * ボールがドリブラーの中心付近にあるか (横ずれが kickCenterTolerance 以内)
+     * 実機ではドリブラーがボールを中心に寄せないので、ずれたまま蹴るとボールが斜めに飛ぶ
+     */
+    public static boolean isBallCentered(DribbleStepState state, Config.RLDribble cfg) {
+        if (cfg.kickCenterTolerance <= 0.0)
+            return true;
+        final double offset = state.toLocal(state.ballPos().subtract(state.robotPos())).getY();
+        return FastMath.abs(offset) <= cfg.kickCenterTolerance;
     }
 
     /**
@@ -198,6 +245,7 @@ public class ActionRLDribble extends AbstractAction {
         if (serial == this.teacherSerial)
             return;
         this.teacherSerial = serial;
+        this.stableFrames = 0;
         this.kickTeacher = new ActionKick(this.id, this.color);
         final Config config = ConfigManager.getInstance().getConfig();
         this.commandConverter = new PIDController(config.getCycleTime(), config.controllerConfig);
