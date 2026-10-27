@@ -642,7 +642,7 @@ public class TestRLDribble {
 
         List<String> csv = Files.readAllLines(runDir.resolve("episodes.csv"), StandardCharsets.UTF_8);
         assertEquals(3, csv.size());
-        assertTrue(csv.get(0).endsWith("shoot,min_target_dist"));
+        assertTrue(csv.get(0).endsWith("shoot,min_target_dist,kick_offset,kick_max_speed,ball_end_x,ball_end_y,eval_end"));
         String[] ep0 = csv.get(1).split(",");
         String[] ep1 = csv.get(2).split(",");
         assertEquals("SUCCESS", ep0[3]);
@@ -650,6 +650,11 @@ public class TestRLDribble {
         assertEquals("0", ep0[8]);
         assertTrue(Double.parseDouble(ep0[9]) < config().rlDribble.passSuccessRadius);
         assertTrue(Double.parseDouble(ep1[9]) > config().rlDribble.passSuccessRadius);
+        // 蹴った後の様子: 成功は目標の近くを通った、外れは通り過ぎた・止まったなど
+        assertEquals("NEAR_TARGET", ep0[14]);
+        assertTrue(List.of("PASSED", "STOPPED", "OUT", "TIME").contains(ep1[14]), ep1[14]);
+        assertTrue(Double.parseDouble(ep0[11]) > config().rlDribble.kickDetectSpeed);
+        assertTrue(FastMath.abs(Double.parseDouble(ep0[10])) < 20.0);
         // 外したときは目標から外れた距離に応じたペナルティ
         assertTrue(Double.parseDouble(ep1[5]) < Double.parseDouble(ep0[5]));
 
@@ -690,6 +695,102 @@ public class TestRLDribble {
     }
 
     @Test
+    void hiddenBallAfterKickIsNotJudgedStopped() {
+        // 蹴った後にボールが一瞬見えなくなっても (速度は0になる)、止まったとはみなさない
+        rl().saveData = false;
+        rl().shootRatio = 0.0;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        double now = begin(session, 10.0);
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        Mover mover = new Mover(s);
+        int sinceKick = 0;
+        for (int i = 0; i < 2000 && session.getCompletedEpisodes() == 0; i++) {
+            now += CYCLE;
+            final boolean kick = mover.move(MathHelper.direction(s.kickTarget(), mover.robotPos));
+            World w = mover.world();
+            if (mover.kicked && ++sinceKick >= 5 && sinceKick < 15)
+                w.getBall().setLost(true);
+            if (step(session, w, now, kick ? 100.0 : 0.0) == RLDribbleSession.Directive.ACT && kick)
+                mover.kick();
+        }
+        assertTrue(sinceKick >= 15);
+        assertTrue(session.getStatusText().contains("success 100%"), session.getStatusText());
+    }
+
+    @Test
+    void kickOnlyWhenBallIsCentered() {
+        final Vector2D robotPos = new Vector2D(500, -300);
+        final double theta = 0.7;
+        final Config.RLDribble cfg = rl();
+        for (double[] c : new double[][]{{0.0, 1}, {10.0, 1}, {-10.0, 1}, {30.0, 0}, {-30.0, 0}}) {
+            // ドリブラー前で横に c[0] mm ずれたボール
+            final Vector2D ball = facePos(robotPos, theta).add(MathHelper.getFromPolar(c[0], theta + FastMath.PI / 2.0));
+            DribbleStepState st = DribbleStepState.measure(world(robotPos, theta, ball), TeamColor.BLUE, 3, Vector2D.ZERO,
+                    false, Optional.empty(), config()).orElseThrow();
+            assertEquals(c[1] == 1, ActionRLDribble.isBallCentered(st, cfg), "offset " + c[0]);
+        }
+        // 0以下なら制限しない
+        cfg.kickCenterTolerance = 0.0;
+        DribbleStepState st = DribbleStepState.measure(world(robotPos, theta,
+                facePos(robotPos, theta).add(MathHelper.getFromPolar(30.0, theta + FastMath.PI / 2.0))), TeamColor.BLUE, 3,
+                Vector2D.ZERO, false, Optional.empty(), config()).orElseThrow();
+        assertTrue(ActionRLDribble.isBallCentered(st, rl()));
+    }
+
+    @Test
+    void ballWanderedEndsEpisode(@TempDir Path tempDir) throws Exception {
+        // 蹴らないままボールを押して追いかけ続けると (触れ続けてはいないので1m制限にはならない)、一定距離で失敗にする
+        rl().outputDir = tempDir.toString();
+        rl().shootRatio = 0.0;
+        rl().spawnMargin = 1800.0;
+        rl().seed = 1;
+        RLDribbleSession session = RLDribbleSession.getInstance();
+        double now = begin(session, 10.0);
+        final DribbleScenario s = session.getScenario().orElseThrow();
+        // 場外に出ないようフィールドの中央へ向かって、ボールの200mm後ろを1m/sでついていく
+        final Vector2D dir = s.ballPos().getNorm() > 1.0 ? s.ballPos().normalize().negate() : new Vector2D(1.0, 0.0);
+        Vector2D ball = s.ballPos();
+        for (int i = 0; i < 300 && session.getCompletedEpisodes() == 0; i++) {
+            now += CYCLE;
+            ball = ball.add(dir.scalarMultiply(1000.0 * CYCLE));
+            final Vector2D robot = ball.subtract(dir.scalarMultiply(200.0));
+            step(session, world(robot, MathHelper.direction(dir), dir.scalarMultiply(1000.0), ball,
+                    dir.scalarMultiply(1000.0), List.of()), now);
+        }
+        assertEquals(1, session.getCompletedEpisodes());
+        // 初期位置から ballWanderLimit (2m) 動いたところで終わる
+        assertEquals(config().rlDribble.ballWanderLimit, MathHelper.distance2D(ball, s.ballPos()), 50.0);
+        RLDataWriter writer = session.getWriter().orElseThrow();
+        session.stop();
+        assertTrue(writer.awaitTermination(10));
+        List<String> csv = Files.readAllLines(writer.getRunDir().resolve("episodes.csv"), StandardCharsets.UTF_8);
+        assertEquals("BALL_WANDERED", csv.get(1).split(",")[3]);
+    }
+
+    @Test
+    void kickWaitsUntilBallIsStablyHeld() {
+        final Config.RLDribble cfg = rl();
+        final Vector2D robotPos = new Vector2D(500, -300);
+        final double theta = 0.7;
+        final DribbleStepState held = DribbleStepState.measure(world(robotPos, theta, facePos(robotPos, theta)),
+                TeamColor.BLUE, 3, Vector2D.ZERO, false, Optional.empty(), config()).orElseThrow();
+        final DribbleStepState offCenter = DribbleStepState.measure(world(robotPos, theta, facePos(robotPos, theta)
+                        .add(MathHelper.getFromPolar(30.0, theta + FastMath.PI / 2.0))), TeamColor.BLUE, 3, Vector2D.ZERO,
+                false, Optional.empty(), config()).orElseThrow();
+        final DribbleStepState away = DribbleStepState.measure(world(robotPos, theta,
+                robotPos.add(MathHelper.getFromPolar(400.0, theta))), TeamColor.BLUE, 3, Vector2D.ZERO, false,
+                Optional.empty(), config()).orElseThrow();
+        assertTrue(held.haveBall());
+        // 保持して中心にある間は数え、ずれたり離れたりしたら0から数え直す
+        int n = 0;
+        for (int i = 0; i < 5; i++)
+            n = ActionRLDribble.nextStableFrames(n, held, cfg);
+        assertEquals(5, n);
+        assertEquals(0, ActionRLDribble.nextStableFrames(n, offCenter, cfg));
+        assertEquals(0, ActionRLDribble.nextStableFrames(n, away, cfg));
+    }
+
+    @Test
     void excessiveDribbleBeforeKick() {
         rl().saveData = false;
         rl().shootRatio = 0.0;
@@ -721,6 +822,9 @@ public class TestRLDribble {
     void dribbleLimitResetsWhenBallLeaves() {
         rl().saveData = false;
         rl().shootRatio = 0.0;
+        // 1.4m 運ぶので、場外に出ないようボールを中央寄りに置き、シードも固定する (時刻から決めると端に置かれることがある)
+        rl().spawnMargin = 1800.0;
+        rl().seed = 1;
         RLDribbleSession session = RLDribbleSession.getInstance();
         double now = begin(session, 10.0);
         final DribbleScenario s = session.getScenario().orElseThrow();
