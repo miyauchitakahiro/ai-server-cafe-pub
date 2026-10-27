@@ -2058,6 +2058,12 @@ public class RegistryInputComponents {
                 }, tab).setDisplayType(0, EnumDisplayType.RATIO).setDisplayType(2, EnumDisplayType.RATIO));
         addRLDribbleField(components, "approach limit [s]", left, envTop + 28, false,
                 () -> rlConfig().approachTimeout, v -> rlConfig().approachTimeout = v);
+        addRLDribbleField(components, "kick center [mm]", right, envTop + 28, false,
+                () -> rlConfig().kickCenterTolerance, v -> rlConfig().kickCenterTolerance = v);
+        addRLDribbleField(components, "kick stable [frm]", left, envTop + 28 + pitch, true,
+                () -> rlConfig().kickStableFrames, v -> rlConfig().kickStableFrames = (int) v);
+        addRLDribbleField(components, "wander limit [mm]", right, envTop + 28 + pitch, false,
+                () -> rlConfig().ballWanderLimit, v -> rlConfig().ballWanderLimit = v);
     }
 
     @Nonnull
