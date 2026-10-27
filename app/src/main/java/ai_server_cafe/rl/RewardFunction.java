@@ -58,7 +58,7 @@ public final class RewardFunction {
         return switch (reason) {
             case SUCCESS -> cfg.successReward;
             case MISSED -> -FastMath.min(cfg.failurePenalty, cfg.missWeight * missDistance / 1000.0);
-            case BALL_LOST, OUT_OF_FIELD, EXCESSIVE_DRIBBLE -> -cfg.failurePenalty;
+            case BALL_LOST, OUT_OF_FIELD, EXCESSIVE_DRIBBLE, BALL_WANDERED -> -cfg.failurePenalty;
             case TIMEOUT -> 0.0;
         };
     }

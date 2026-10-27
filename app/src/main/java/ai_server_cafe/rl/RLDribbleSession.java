@@ -66,6 +66,7 @@ public final class RLDribbleSession {
         BALL_LOST,          // 蹴る前にボールが離れた
         OUT_OF_FIELD,       // 蹴る前にロボットかボールが場外に出た
         EXCESSIVE_DRIBBLE,  // 1m制限を超えて運んだ
+        BALL_WANDERED,      // 蹴らないまま、ボールが初期位置から ballWanderLimit を超えて動いた (押し続けて追いかけた)
         TIMEOUT             // 時間内に蹴らなかった
     }
 
@@ -125,6 +126,11 @@ public final class RLDribbleSession {
     private Optional<float[]> kickRow;  // 蹴る直前のステップ (報酬に結果を足して保存する)
     private Optional<float[]> lastRow;  // 蹴った直後の観測 (最終行)
     private double minTargetDistance;   // 蹴った後にボールが目標に最も近づいた距離
+    // 蹴った後のボールの様子 (episodes.csv に記録して、外れた原因を調べるのに使う)
+    private double kickOffset;          // 蹴る直前のボールの横ずれ (ロボット座標系のy, 左が+) [mm]
+    private double kickMaxSpeed;        // 蹴った後のボールの最高速度 [mm/s]
+    private Optional<Vector2D> ballEndPos; // 結果が決まったときのボール位置 (フィールド座標系)
+    private String evalEnd;             // 結果の決まり方 (GOAL, NEAR_TARGET, STOPPED, PASSED, OUT, TIME)
 
     /**
      * 観測済みで報酬がまだ決まっていないステップ
@@ -165,6 +171,8 @@ public final class RLDribbleSession {
         this.pending = Optional.empty();
         this.kickRow = Optional.empty();
         this.lastRow = Optional.empty();
+        this.ballEndPos = Optional.empty();
+        this.evalEnd = "";
         this.lastRecordedAction = new double[DribbleObservation.ACTION_DIM];
     }
 
@@ -431,7 +439,7 @@ public final class RLDribbleSession {
             case RUNNING:
                 return this.step(obs, state, invert, now);
             case EVALUATING:
-                return this.evaluate(state, world.getField(), now);
+                return this.evaluate(state, world.getField(), invert, now);
             default:
                 return Directive.HALT;
         }
@@ -648,6 +656,9 @@ public final class RLDribbleSession {
                 reason = Optional.of(EndReason.EXCESSIVE_DRIBBLE);
             else if (!state.inField())
                 reason = Optional.of(EndReason.OUT_OF_FIELD);
+            else if (cfg.ballWanderLimit > 0.0 && this.scenario.isPresent() && MathHelper.distance2D(
+                    invert ? state.ballPos().negate() : state.ballPos(), this.scenario.get().ballPos()) > cfg.ballWanderLimit)
+                reason = Optional.of(EndReason.BALL_WANDERED);
             else if (MathHelper.distance2D(state.robotPos(), state.ballPos()) > cfg.lostDistance)
                 reason = Optional.of(EndReason.BALL_LOST);
             else if (now - this.episodeStartTime >= cfg.maxEpisodeTime)
@@ -674,6 +685,7 @@ public final class RLDribbleSession {
                     p.invert, p.time - this.episodeStartTime));
             this.lastRecordedAction = p.action;
         }
+        final Optional<DribbleStepState> prevState = this.pending.map(pp -> pp.state);
         this.pending = Optional.empty();
 
         final float[] finalRow = this.makeRow(obs, new double[DribbleObservation.ACTION_DIM], 0.0,
@@ -683,6 +695,8 @@ public final class RLDribbleSession {
             this.kickRow = previousRow;
             this.lastRow = Optional.of(finalRow);
             this.minTargetDistance = state.ballToTargetDistance();
+            this.kickOffset = prevState.map(s -> s.toLocal(s.ballPos().subtract(s.robotPos())).getY()).orElse(0.0);
+            this.kickMaxSpeed = state.ballVel().getNorm();
             this.phaseStartTime = now;
             this.phase = Phase.EVALUATING;
             this.status = "evaluating";
@@ -704,24 +718,32 @@ public final class RLDribbleSession {
     /**
      * 蹴った後のボールの行方から成否を決める
      */
-    private Directive evaluate(DribbleStepState state, Field field, double now) {
+    private Directive evaluate(DribbleStepState state, Field field, boolean invert, double now) {
         final Config.RLDribble cfg = this.config.rlDribble;
         final double dist = state.ballToTargetDistance();
         this.minTargetDistance = FastMath.min(this.minTargetDistance, dist);
+        if (state.ballVisible())
+            this.kickMaxSpeed = FastMath.max(this.kickMaxSpeed, state.ballVel().getNorm());
         final Vector2D ball = state.ballPos();
         // Actionの座標系では相手ゴールは+x側
         final boolean goal = ball.getX() > field.getMaxX() && FastMath.abs(ball.getY()) < field.getGoalWidth() / 2.0;
         final boolean outOfField = FastMath.abs(ball.getX()) > field.getMaxX() || FastMath.abs(ball.getY()) > field.getMaxY();
-        final boolean over = outOfField || dist > this.minTargetDistance + PASSED_MARGIN
-                || state.ballVel().getNorm() < BALL_STOP_SPEED;
+        final boolean passed = dist > this.minTargetDistance + PASSED_MARGIN;
+        // 見えないボールの速度は0になっているので、止まったかは見えているときだけ判断する
+        final boolean stopped = state.ballVisible() && state.ballVel().getNorm() < BALL_STOP_SPEED;
+        final boolean timeUp = now - this.phaseStartTime >= cfg.evalMaxTime;
 
         Optional<Boolean> success = Optional.empty();
-        if (state.shoot() ? goal : this.minTargetDistance < cfg.passSuccessRadius)
+        if (state.shoot() ? goal : this.minTargetDistance < cfg.passSuccessRadius) {
             success = Optional.of(true);
-        else if (over || now - this.phaseStartTime >= cfg.evalMaxTime)
+            this.evalEnd = state.shoot() ? "GOAL" : "NEAR_TARGET";
+        } else if (outOfField || passed || stopped || timeUp) {
             success = Optional.of(false);
+            this.evalEnd = outOfField ? "OUT" : passed ? "PASSED" : stopped ? "STOPPED" : "TIME";
+        }
         if (success.isEmpty())
             return Directive.HALT;
+        this.ballEndPos = Optional.of(invert ? ball.negate() : ball);
 
         final EndReason reason = success.get() ? EndReason.SUCCESS : EndReason.MISSED;
         final double bonus = RewardFunction.terminalBonus(cfg, reason, this.minTargetDistance);
@@ -773,8 +795,13 @@ public final class RLDribbleSession {
         // 蹴っていなければ目標までの最短距離は無い
         final double minDistance = reason == EndReason.SUCCESS || reason == EndReason.MISSED ? this.minTargetDistance : -1.0;
         final boolean shoot = this.isShoot();
+        // 蹴っていなければ蹴った後の記録は無い
+        final boolean kicked = reason == EndReason.SUCCESS || reason == EndReason.MISSED;
+        final RLDataWriter.KickResult kick = kicked
+                ? new RLDataWriter.KickResult(this.kickOffset, this.kickMaxSpeed, this.ballEndPos, this.evalEnd)
+                : RLDataWriter.KickResult.NONE;
         this.writer.ifPresent(w -> w.writeEpisode(index, this.rows, reason.name(), success, this.episodeReturn,
-                now - this.episodeStartTime, seed, shoot, minDistance));
+                now - this.episodeStartTime, seed, shoot, minDistance, kick));
         LOGGER.debug("rl dribble episode {} : {} ({} steps, return {})", index, reason, this.rows.size(), this.episodeReturn);
         this.episodeIndex++;
         this.discardEpisode();
@@ -794,6 +821,10 @@ public final class RLDribbleSession {
         this.pending = Optional.empty();
         this.kickRow = Optional.empty();
         this.lastRow = Optional.empty();
+        this.kickOffset = 0.0;
+        this.kickMaxSpeed = 0.0;
+        this.ballEndPos = Optional.empty();
+        this.evalEnd = "";
     }
 
     private boolean openWriter(TeamColor color) {
