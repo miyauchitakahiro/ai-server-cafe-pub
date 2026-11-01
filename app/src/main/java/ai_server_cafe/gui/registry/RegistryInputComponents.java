@@ -2064,6 +2064,8 @@ public class RegistryInputComponents {
                 () -> rlConfig().kickStableFrames, v -> rlConfig().kickStableFrames = (int) v);
         addRLDribbleField(components, "wander limit [mm]", right, envTop + 28 + pitch, false,
                 () -> rlConfig().ballWanderLimit, v -> rlConfig().ballWanderLimit = v);
+        addRLDribbleField(components, "center margin [mm]", left, envTop + 28 + 2 * pitch, false,
+                () -> rlConfig().centerLineMargin, v -> rlConfig().centerLineMargin = v);
     }
 
     @Nonnull

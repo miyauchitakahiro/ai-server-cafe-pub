@@ -773,6 +773,8 @@ public class Config extends AbstractCloneable {
         public boolean parkOtherRobots;     // 使わないロボットをタッチラインの外に並べる (TELEPORTのみ)
         // 初期配置
         public double spawnMargin;          // フィールド境界からの余白
+        public double centerLineMargin;     // ロボット・ボール・目標をセンターラインからこれ以上離し、全部同じ側に置く [mm] (0以下で無効)
+                                            // 実機ではカメラ2台の境目 (センターライン付近) でボールを見失うことがあるため
         public double ballStartDistance;    // 開始時のロボット中心からボールまでの距離 (ボールはロボットの正面)
         public double shootRatio;           // シュートにするエピソードの割合 (残りはパス)
         public double passMinDist;          // ボールからパス目標までの距離
@@ -825,6 +827,7 @@ public class Config extends AbstractCloneable {
             this.approachTimeout = 15.0;
             this.parkOtherRobots = true;
             this.spawnMargin = 300.0;
+            this.centerLineMargin = 500.0;
             this.ballStartDistance = 500.0;
             this.shootRatio = 0.5;
             this.passMinDist = 1500.0;
@@ -876,6 +879,7 @@ public class Config extends AbstractCloneable {
             result.approachTimeout = this.approachTimeout;
             result.parkOtherRobots = this.parkOtherRobots;
             result.spawnMargin = this.spawnMargin;
+            result.centerLineMargin = this.centerLineMargin;
             result.ballStartDistance = this.ballStartDistance;
             result.shootRatio = this.shootRatio;
             result.passMinDist = this.passMinDist;

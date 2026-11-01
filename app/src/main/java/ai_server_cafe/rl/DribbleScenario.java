@@ -19,6 +19,8 @@ import java.util.SplittableRandom;
  * 1エピソードの初期配置と課題 (フィールド座標系, invertなし)
  * ボールはロボットの正面 rlDribble.ballStartDistance の位置に置く。
  * パスならボールからランダムな距離・方向の地点、シュートなら相手ゴール内の地点を kickTarget にする。
+ * rlDribble.centerLineMargin が正なら、ロボット・ボール・目標をセンターラインからその距離以上離し、
+ * すべて同じ側に置く (ボールがセンターラインを横切らない。実機のカメラの境目でボールを見失うのを避ける)。
  *
  * @param kickTarget パス・シュートの目標地点
  * @param shoot      シュートか (falseならパス)
@@ -49,7 +51,7 @@ public record DribbleScenario(long seed, Vector2D robotPos, double robotTheta, V
      * シュートにしたエピソードでもボールの位置からシュートできなければパスにする。
      *
      * @param ballPos 今のボール位置 (フィールド座標系)
-     * @return ボールがフィールドの余白より内側に無ければempty (人がボールを戻すのを待つ)
+     * @return ボールがフィールドの余白より内側に無い、またはセンターライン付近にあればempty (人がボールを動かすのを待つ)
      */
     @Nonnull
     public static Optional<DribbleScenario> generateFromBall(long seed, @Nonnull Field field, @Nonnull Config config,
@@ -82,7 +84,8 @@ public record DribbleScenario(long seed, Vector2D robotPos, double robotTheta, V
         final double maxY = field.getMaxY() - cfg.spawnMargin;
         if (minX >= maxX || minY >= maxY)
             return Optional.empty();
-        if (fixedBall.isPresent() && !inside(fixedBall.get(), minX, maxX, minY, maxY))
+        if (fixedBall.isPresent() && (!inside(fixedBall.get(), minX, maxX, minY, maxY)
+                || !awayFromCenter(fixedBall.get(), fixedBall.get(), cfg.centerLineMargin)))
             return Optional.empty();
 
         final double ballDist = getBallStartDistance(config);
@@ -116,6 +119,11 @@ public record DribbleScenario(long seed, Vector2D robotPos, double robotTheta, V
                     continue;
             }
             final Vector2D robotPos = ballPos.subtract(MathHelper.getFromPolar(ballDist, theta));
+            // センターライン: ロボットと目標をボールと同じ側に置く (線分が同じ側にあればボールは横切らない)
+            if (!awayFromCenter(ballPos, ballPos, cfg.centerLineMargin)
+                    || !awayFromCenter(robotPos, ballPos, cfg.centerLineMargin)
+                    || !awayFromCenter(kickTarget, ballPos, cfg.centerLineMargin))
+                continue;
             if (inside(ballPos, minX, maxX, minY, maxY) && inside(robotPos, minX, maxX, minY, maxY))
                 return Optional.of(new DribbleScenario(seed, robotPos, MathHelper.wrapPI(theta), ballPos, kickTarget, shoot));
         }
@@ -211,6 +219,16 @@ public record DribbleScenario(long seed, Vector2D robotPos, double robotTheta, V
      */
     private static boolean inside(Vector2D pos, double minX, double maxX, double minY, double maxY) {
         return pos.getX() >= minX && pos.getX() <= maxX && pos.getY() >= minY && pos.getY() <= maxY;
+    }
+
+    /**
+     * pos がセンターラインから margin 以上離れていて、side と同じ側 (xの符号が同じ) にあるか
+     * margin が0以下なら常に true
+     */
+    public static boolean awayFromCenter(@Nonnull Vector2D pos, @Nonnull Vector2D side, double margin) {
+        if (margin <= 0.0)
+            return true;
+        return FastMath.abs(pos.getX()) >= margin && FastMath.signum(pos.getX()) == FastMath.signum(side.getX());
     }
 
     /**

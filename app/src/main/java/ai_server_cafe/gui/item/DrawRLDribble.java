@@ -33,7 +33,7 @@ public class DrawRLDribble implements IItemDraw {
             "rl_dribble_start_heading", "rl_dribble_start_ball", "rl_dribble_start_label", "rl_dribble_target",
             "rl_dribble_target_cross1", "rl_dribble_target_cross2", "rl_dribble_target_label", "rl_dribble_limit");
     private static final List<String> AREA_KEYS = List.of("rl_dribble_area0", "rl_dribble_area1", "rl_dribble_area2",
-            "rl_dribble_area3");
+            "rl_dribble_area3", "rl_dribble_center0", "rl_dribble_center1");
 
     @Override
     public void init(Class<? extends IContainerCafe> area,
@@ -118,6 +118,15 @@ public class DrawRLDribble implements IItemDraw {
         for (int i = 0; i < 4; i++) {
             graphicalComponents.put(AREA_KEYS.get(i), new LineCafe(flip(corners[i], invert),
                     flip(corners[(i + 1) % 4], invert), ColorHelper.ARCHIVE_SKY, 8.0F));
+        }
+        // センターライン付近の使えない帯 (この中にボールがあると人が動かすまで待つ)
+        final double m = config.rlDribble.centerLineMargin;
+        for (int i = 0; i < 2; i++) {
+            final double x = i == 0 ? -m : m;
+            graphicalComponents.put(AREA_KEYS.get(4 + i), m > 0.0
+                    ? new LineCafe(flip(new Vector2D(x, a[2]), invert), flip(new Vector2D(x, a[3]), invert),
+                    ColorHelper.ARCHIVE_SKY, 8.0F)
+                    : new NoneCafe());
         }
     }
 
