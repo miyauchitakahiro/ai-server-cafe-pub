@@ -416,6 +416,36 @@ public class TestRLDribble {
     }
 
     @Test
+    void scenarioAvoidsCenterLine() {
+        Field field = new Field();
+        final Config c = config();
+        c.rlDribble.centerLineMargin = 500.0;
+        final double m = c.rlDribble.centerLineMargin;
+        // TELEPORT: ロボット・ボール・目標がセンターラインから離れ、全部同じ側にある
+        for (long seed = 1; seed < 300; seed++) {
+            for (double goalSign : new double[]{1.0, -1.0}) {
+                DribbleScenario s = DribbleScenario.generate(seed, field, c, goalSign).orElseThrow();
+                final double side = FastMath.signum(s.ballPos().getX());
+                for (Vector2D p : new Vector2D[]{s.robotPos(), s.ballPos(), s.kickTarget()}) {
+                    assertTrue(FastMath.abs(p.getX()) >= m - 1e-6, "seed " + seed + " " + p);
+                    assertEquals(side, FastMath.signum(p.getX()), "seed " + seed + " " + p);
+                }
+            }
+        }
+        // FROM_BALL: センターライン付近のボールは使えない (人が動かすのを待つ)、離れていれば同じ側に作る
+        assertTrue(DribbleScenario.generateFromBall(1, field, c, 1.0, new Vector2D(300, 0)).isEmpty());
+        assertTrue(DribbleScenario.generateFromBall(1, field, c, 1.0, new Vector2D(-300, 500)).isEmpty());
+        final Vector2D ball = new Vector2D(-1000, 500);
+        for (long seed = 1; seed < 200; seed++) {
+            DribbleScenario s = DribbleScenario.generateFromBall(seed, field, c, 1.0, ball).orElseThrow();
+            assertTrue(s.robotPos().getX() <= -m + 1e-6 && s.kickTarget().getX() <= -m + 1e-6, "seed " + seed);
+        }
+        // 0 で無効 (センターライン上のボールも使える)
+        c.rlDribble.centerLineMargin = 0.0;
+        assertTrue(DribbleScenario.generateFromBall(1, field, c, 1.0, new Vector2D(0, 0)).isPresent());
+    }
+
+    @Test
     void fromBallWaitsThenApproachesAndStarts() {
         rl().saveData = false;
         rl().resetMode = EnumRLResetMode.FROM_BALL;
