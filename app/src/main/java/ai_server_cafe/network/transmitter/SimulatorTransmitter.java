@@ -5,12 +5,15 @@ import ai_server_cafe.model.network.SendCommand;
 import ai_server_cafe.network.proto.ssl.simulation.SslGcCommon;
 import ai_server_cafe.network.proto.ssl.simulation.SslSimulationControl;
 import ai_server_cafe.network.proto.ssl.simulation.SslSimulationRobotControl;
+import ai_server_cafe.network.proto.ssl.simulation.SslSimulationRobotFeedback;
 import ai_server_cafe.network.radio.EnumRadioType;
 import ai_server_cafe.updater.ConfigManager;
 import ai_server_cafe.updater.UpdaterOptionalCommand;
+import ai_server_cafe.updater.UpdaterRobotFeedback;
 import ai_server_cafe.util.EnumKickType;
 import ai_server_cafe.util.TeamColor;
 import ai_server_cafe.util.math.KickConverter;
+import com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.commons.math3.geometry.euclidean.twod.Vector2D;
 import org.apache.commons.math3.util.FastMath;
 import org.apache.commons.math3.util.Pair;
@@ -20,7 +23,9 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,18 +78,66 @@ public class SimulatorTransmitter extends UDPMulticastTransmitter {
                     .setVAngular(0f)
                     .build());
         }
-        SslSimulationControl.SimulatorControl control = controlBuilder.build();
+        this.sendControl(controlBuilder.build());
+    }
+
+    /**
+     * SimulatorControl (テレポート等) をそのまま送る
+     * OptionalCommandでは表現できないロボットの向きなどを指定したいときに使う
+     */
+    public void sendControl(SslSimulationControl.SimulatorControl control) {
+        if (this.socket == null || this.hostAddress == null) {
+            this.logger.warn("simulator transmitter is not started");
+            return;
+        }
         SslSimulationControl.SimulatorCommand command = SslSimulationControl.SimulatorCommand.newBuilder().setControl(control).build();
-        this.port = ConfigManager.getInstance().getConfig().simControlPort;
+        final int controlPort = ConfigManager.getInstance().getConfig().simControlPort;
         final byte[] sendBuf = command.toByteArray();
         try {
-            this.socket.setSendBufferSize(sendBuf.length);
-            final DatagramPacket packet = new DatagramPacket(sendBuf, sendBuf.length, new InetSocketAddress(this.hostAddress, this.port));
+            final DatagramPacket packet = new DatagramPacket(sendBuf, sendBuf.length, new InetSocketAddress(this.hostAddress, controlPort));
             this.socket.send(packet);
         } catch (SocketException e) {
             this.logger.error("socket error occurred at single command sender");
         } catch (IOException e) {
             this.logger.error("socket io error occurred at single command sender");
+        }
+    }
+
+    /**
+     * シミュレータからのRobotControlResponseを受信する
+     * 送信はsendCommandsが直接行うので親クラスの送信処理は使わない
+     */
+    @Override
+    protected void loop() {
+        if (this.socket == null || this.socket.isClosed())
+            return;
+        final byte[] receiveBuf = new byte[4096];
+        final DatagramPacket packet = new DatagramPacket(receiveBuf, receiveBuf.length);
+        try {
+            this.socket.receive(packet);
+        } catch (SocketTimeoutException e) {
+            return;
+        } catch (IOException e) {
+            if (!this.isInterrupted())
+                this.logger.debug("simulator response could not be received");
+            return;
+        }
+        final int fromPort = packet.getPort();
+        final int bluePort = ConfigManager.getInstance().getConfig().simBluePort;
+        final int yellowPort = ConfigManager.getInstance().getConfig().simYellowPort;
+        // 制御ポートからのSimulatorResponseは対象外
+        if (fromPort != bluePort && fromPort != yellowPort)
+            return;
+        final TeamColor color = fromPort == yellowPort ? TeamColor.YELLOW : TeamColor.BLUE;
+        try {
+            SslSimulationRobotFeedback.RobotControlResponse response = SslSimulationRobotFeedback.RobotControlResponse
+                    .parseFrom(Arrays.copyOf(packet.getData(), packet.getLength()));
+            for (SslSimulationRobotFeedback.RobotFeedback feedback : response.getFeedbackList()) {
+                if (feedback.hasDribblerBallContact())
+                    UpdaterRobotFeedback.getInstance().updateBallContact(color, feedback.getId(), feedback.getDribblerBallContact());
+            }
+        } catch (InvalidProtocolBufferException e) {
+            this.logger.debug("invalid robot control response");
         }
     }
 

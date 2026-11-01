@@ -76,6 +76,7 @@ public class Config extends AbstractCloneable {
     public int saveFormat;
     public boolean enableRecord;
     public ConfigEditorConfig configEditorConfig;
+    public RLDribble rlDribble;
 
     public Config() {
         this.allowAutoReboot = false;
@@ -147,6 +148,7 @@ public class Config extends AbstractCloneable {
         this.saveFormat = 1;
         this.enableRecord = true;
         this.configEditorConfig = new ConfigEditorConfig();
+        this.rlDribble = new RLDribble();
     }
 
     public EnumCaptainType getCaptain(@Nonnull TeamColor color) {
@@ -245,6 +247,8 @@ public class Config extends AbstractCloneable {
         result.saveFormat = this.saveFormat;
         result.enableRecord = this.enableRecord;
         result.configEditorConfig = this.configEditorConfig;
+        // 古いconfig.jsonには存在しないのでnullの場合はデフォルト値にする
+        result.rlDribble = this.rlDribble == null ? new RLDribble() : this.rlDribble.clone();
         return result;
     }
 
@@ -741,6 +745,171 @@ public class Config extends AbstractCloneable {
                 result.obstacleIntegrationStep = this.obstacleIntegrationStep;
                 return result;
             }
+        }
+    }
+
+    /**
+     * ドリブル強化学習 (ボールに寄って向きを作りパス・シュートする) のデータ収集設定
+     * 長さの単位は mm, 時間の単位は s
+     */
+    public static class RLDribble extends AbstractCloneable {
+        // 収集
+        public EnumRLEnvironment environment; // シミュレータか実機か
+        public EnumRLResetMode resetMode;   // 初期配置の作り方 (実機ではFROM_BALLのみ)
+        public int targetEpisodes;          // 自動で収集するエピソード数
+        public boolean saveData;            // falseなら動作のみでファイルに保存しない
+        public String outputDir;            // 保存先 (この下に実行ごとのディレクトリを作る)
+        public int robotId;                 // 動かすロボットID (-1なら見えている最初のロボット)
+        public EnumRLActionSource actionSource;
+        public String policyPath;           // actionSourceがPOLICY系のときに使う方策 (RL_testのexport_onnx.pyで作る.onnx)
+        public long seed;                   // 0なら時刻から決める
+        public boolean drawScenario;        // 開始位置とキック目標をフィールドに描画する
+        // エピソード
+        public double maxEpisodeTime;       // この時間内に蹴らなければ打ち切り
+        public double settleTime;           // テレポート後に静止させて待つ時間
+        public double resetPause;           // エピソード終了から次のテレポートまで停止させる時間
+        public int maxResetRetries;         // 連続でリセットに失敗したら収集を止める
+        public double approachTimeout;      // FROM_BALL: この時間内に開始位置に着かなければ初期配置を作り直す
+        public boolean parkOtherRobots;     // 使わないロボットをタッチラインの外に並べる (TELEPORTのみ)
+        // 初期配置
+        public double spawnMargin;          // フィールド境界からの余白
+        public double centerLineMargin;     // ロボット・ボール・目標をセンターラインからこれ以上離し、全部同じ側に置く [mm] (0以下で無効)
+                                            // 実機ではカメラ2台の境目 (センターライン付近) でボールを見失うことがあるため
+        public double ballStartDistance;    // 開始時のロボット中心からボールまでの距離 (ボールはロボットの正面)
+        public double shootRatio;           // シュートにするエピソードの割合 (残りはパス)
+        public double passMinDist;          // ボールからパス目標までの距離
+        public double passMaxDist;
+        public double shootMaxDist;         // シュート時のボールと相手ゴール中心の最大距離
+        public double shootAimWidth;        // シュート目標をゴール幅のこの割合の範囲に置く
+        // キック (教師ActionKick)
+        public double shootSpeed;           // シュートのボール速度 [mm/s] (パスはKickConverter.passSpeed)
+        public int kickHoldTime;            // ActionKickが向きを合わせてから蹴るまで待つフレーム数
+        public double kickCenterTolerance;  // ボールの横ずれ (ロボット座標系のy) がこれを超えていたら蹴らない [mm] (0以下で無効)
+        public int kickStableFrames;        // ボールを保持して中心にある状態がこのフレーム数続いてから蹴る (0で無効, 実機では逆効果だったので既定は0)
+        public double ballWanderLimit;      // 蹴る前にボールが初期位置からこれ以上動いたら失敗 [mm] (0以下で無効)
+        // 終了判定
+        public double dribbleLimit;         // ボールを保持した地点からこの距離を超えて運んだら失敗 (ルールの1m制限)
+        public double holdDistance;         // ドリブラー前のボール位置からのずれがこれ未満で保持
+        public double holdAngle;            // ロボットの向きとボール方向の差がこれ未満で保持 [rad]
+        public double lostDistance;         // 蹴る前にロボット中心とボールの距離がこれを超えたらロスト
+        public double kickDetectSpeed;      // キック指令後にボール速度がこれを超えたら蹴ったとみなす [mm/s]
+        public double evalMaxTime;          // 蹴った後に結果を待つ最大時間
+        public double passSuccessRadius;    // パス: ボールの軌道が目標からこの距離以内を通れば成功
+        // 探索ノイズ (TEACHER_NOISE / POLICY_NOISE, vx・vy・omegaのみ)
+        public double noiseVelStd;          // [mm/s]
+        public double noiseOmegaStd;        // [rad/s]
+        public double noiseCorrelation;     // AR(1)係数 0なら白色ノイズ
+        public int settleDribble;           // リセット中のドリブラー出力
+        // 報酬
+        public double approachWeight;       // 保持していないときにドリブラーがボールに1m近づいたときの報酬
+        public double aimWeight;            // 保持しているときに目標方向との角度差が1rad減ったときの報酬
+        public double successReward;
+        public double failurePenalty;       // ロスト・場外・ドリブル超過
+        public double missWeight;           // 外したとき: 目標に最も近づいた距離 1m あたりのペナルティ (最大failurePenalty)
+        public double timePenalty;          // 1秒あたり
+        public double actionRatePenalty;    // 正規化した行動変化量の二乗に掛ける
+
+        public RLDribble() {
+            this.environment = EnumRLEnvironment.SIMULATOR;
+            this.resetMode = EnumRLResetMode.TELEPORT;
+            this.targetEpisodes = 100;
+            this.saveData = true;
+            this.outputDir = "rl_data";
+            this.robotId = -1;
+            this.actionSource = EnumRLActionSource.TEACHER;
+            this.policyPath = "";
+            this.seed = 0L;
+            this.drawScenario = true;
+            this.maxEpisodeTime = 8.0;
+            this.settleTime = 0.6;
+            this.resetPause = 1.0;
+            this.maxResetRetries = 5;
+            this.approachTimeout = 15.0;
+            this.parkOtherRobots = true;
+            this.spawnMargin = 300.0;
+            this.centerLineMargin = 500.0;
+            this.ballStartDistance = 500.0;
+            this.shootRatio = 0.5;
+            this.passMinDist = 1500.0;
+            this.passMaxDist = 4000.0;
+            this.shootMaxDist = 4000.0;
+            this.shootAimWidth = 0.6;
+            this.shootSpeed = 6000.0;
+            this.kickHoldTime = 20;
+            this.kickCenterTolerance = 15.0;
+            this.kickStableFrames = 0;
+            this.ballWanderLimit = 2000.0;
+            this.dribbleLimit = 1000.0;
+            this.holdDistance = 100.0;
+            this.holdAngle = 0.8;
+            this.lostDistance = 1000.0;
+            this.kickDetectSpeed = 1500.0;
+            this.evalMaxTime = 3.0;
+            this.passSuccessRadius = 150.0;
+            this.noiseVelStd = 300.0;
+            this.noiseOmegaStd = 1.0;
+            this.noiseCorrelation = 0.8;
+            this.settleDribble = 12;
+            this.approachWeight = 0.5;
+            this.aimWeight = 0.5;
+            this.successReward = 10.0;
+            this.failurePenalty = 5.0;
+            this.missWeight = 2.0;
+            this.timePenalty = 0.5;
+            this.actionRatePenalty = 0.05;
+        }
+
+        @Override
+        public RLDribble clone() {
+            RLDribble result = new RLDribble();
+            result.environment = this.environment == null ? EnumRLEnvironment.SIMULATOR : this.environment;
+            result.resetMode = this.resetMode == null ? EnumRLResetMode.TELEPORT : this.resetMode;
+            result.targetEpisodes = this.targetEpisodes;
+            result.saveData = this.saveData;
+            result.outputDir = this.outputDir;
+            result.robotId = this.robotId;
+            result.actionSource = this.actionSource == null ? EnumRLActionSource.TEACHER : this.actionSource;
+            result.policyPath = this.policyPath == null ? "" : this.policyPath;
+            result.seed = this.seed;
+            result.drawScenario = this.drawScenario;
+            result.maxEpisodeTime = this.maxEpisodeTime;
+            result.settleTime = this.settleTime;
+            result.resetPause = this.resetPause;
+            result.maxResetRetries = this.maxResetRetries;
+            result.approachTimeout = this.approachTimeout;
+            result.parkOtherRobots = this.parkOtherRobots;
+            result.spawnMargin = this.spawnMargin;
+            result.centerLineMargin = this.centerLineMargin;
+            result.ballStartDistance = this.ballStartDistance;
+            result.shootRatio = this.shootRatio;
+            result.passMinDist = this.passMinDist;
+            result.passMaxDist = this.passMaxDist;
+            result.shootMaxDist = this.shootMaxDist;
+            result.shootAimWidth = this.shootAimWidth;
+            result.shootSpeed = this.shootSpeed;
+            result.kickHoldTime = this.kickHoldTime;
+            result.kickCenterTolerance = this.kickCenterTolerance;
+            result.kickStableFrames = this.kickStableFrames;
+            result.ballWanderLimit = this.ballWanderLimit;
+            result.dribbleLimit = this.dribbleLimit;
+            result.holdDistance = this.holdDistance;
+            result.holdAngle = this.holdAngle;
+            result.lostDistance = this.lostDistance;
+            result.kickDetectSpeed = this.kickDetectSpeed;
+            result.evalMaxTime = this.evalMaxTime;
+            result.passSuccessRadius = this.passSuccessRadius;
+            result.noiseVelStd = this.noiseVelStd;
+            result.noiseOmegaStd = this.noiseOmegaStd;
+            result.noiseCorrelation = this.noiseCorrelation;
+            result.settleDribble = this.settleDribble;
+            result.approachWeight = this.approachWeight;
+            result.aimWeight = this.aimWeight;
+            result.successReward = this.successReward;
+            result.failurePenalty = this.failurePenalty;
+            result.missWeight = this.missWeight;
+            result.timePenalty = this.timePenalty;
+            result.actionRatePenalty = this.actionRatePenalty;
+            return result;
         }
     }
 

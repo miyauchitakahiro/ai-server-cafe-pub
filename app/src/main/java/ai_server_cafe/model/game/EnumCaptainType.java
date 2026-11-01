@@ -9,6 +9,8 @@ import ai_server_cafe.game.captain.CaptainHalt;
 import ai_server_cafe.game.captain.CaptainKickRegulator;
 import ai_server_cafe.game.captain.CaptainLocate;
 import ai_server_cafe.game.captain.CaptainPlannerParameterRegulator;
+import ai_server_cafe.game.captain.CaptainRLDribble;
+import ai_server_cafe.game.captain.CaptainRLDribbleDF;
 import ai_server_cafe.game.captain.CaptainTDribble;
 import ai_server_cafe.game.captain.CaptainTReceive;
 import ai_server_cafe.game.captain.CaptainTest;
@@ -25,7 +27,9 @@ public enum EnumCaptainType {
     KICK_REGULATOR(8, "kick_regulator", CaptainKickRegulator.class),
     T_DRIBBLE(9, "t_dribble", CaptainTDribble.class),
     HALT(10, "halt", CaptainHalt.class),
-    PP_REGULATOR(11, "pp_regulator", CaptainPlannerParameterRegulator.class);
+    PP_REGULATOR(11, "pp_regulator", CaptainPlannerParameterRegulator.class),
+    RL_DRIBBLE(12, "RLDribble", CaptainRLDribble.class),
+    RL_DRIBBLE_DF(13, "RLDribble_DF", CaptainRLDribbleDF.class);
 
     private int idEnum;
     private String name;

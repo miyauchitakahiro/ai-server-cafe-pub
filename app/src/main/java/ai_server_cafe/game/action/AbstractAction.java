@@ -37,6 +37,10 @@ public abstract class AbstractAction {
         this.invert = value;
     }
 
+    protected boolean isInvert() {
+        return this.invert;
+    }
+
     public void setWorld(World world) {
         this.world = Optional.of(world);
     }
